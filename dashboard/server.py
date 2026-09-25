@@ -19,6 +19,7 @@ import json
 import logging
 import queue
 import re
+import secrets
 import sys
 import threading
 import time
@@ -233,6 +234,38 @@ except Exception:                                            # noqa: BLE001
 
 CRUD = SellersApi(DB_PATH)
 AUTH = load_credentials()
+
+# Сессия дашборда. HTTP Basic не подходит: встроенные браузеры не показывают
+# окно авторизации и отдают голый JSON «Требуется вход» — выглядит как «не
+# открывается». Поэтому вход через обычную форму, а токен живёт в cookie.
+SESSION_COOKIE = "ozon_crm_session"
+SESSION_TOKEN = secrets.token_urlsafe(24)
+
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Вход — Ozon CRM</title>
+<style>
+  body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#0f1115;color:#e6e9ef;font:15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}
+  form{background:#171a21;border:1px solid #262b35;border-radius:12px;padding:28px;width:320px}
+  h1{margin:0 0 6px;font-size:18px}
+  p{margin:0 0 18px;color:#8b93a1;font-size:13px}
+  input{width:100%;padding:10px 12px;border-radius:8px;border:1px solid #262b35;
+    background:#1d2129;color:#e6e9ef;font:inherit;font-size:14px}
+  input:focus{outline:none;border-color:#2f7cf6}
+  button{width:100%;margin-top:14px;padding:11px;border:none;border-radius:8px;
+    background:#2f7cf6;color:#fff;font:inherit;font-size:14px;cursor:pointer}
+  button:hover{background:#4a8cf7}
+  .err{margin-top:12px;color:#f87171;font-size:13px;min-height:18px}
+</style></head><body>
+<form method="POST" action="/api/login">
+  <h1>Ozon CRM</h1>
+  <p>Введите пароль из файла .env</p>
+  <input type="password" name="password" autofocus autocomplete="current-password" placeholder="пароль">
+  <button type="submit">Войти</button>
+  <div class="err">__ERROR__</div>
+</form></body></html>"""
 
 # Раздел Ozon Global, откуда берутся китайские продавцы. Подставляется в форму
 # как значение по умолчанию — это и есть «та самая ссылка».
@@ -1139,36 +1172,69 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     # --- авторизация --------------------------------------------------------- #
-    def _check_auth(self) -> bool:
-        """HTTP Basic. Возвращает True, если запрос можно обработать.
+    def _has_session(self) -> bool:
+        """Есть ли cookie с активной сессией."""
+        cookie = self.headers.get("Cookie", "") or ""
+        return f"{SESSION_COOKIE}={SESSION_TOKEN}" in cookie
 
-        Дашборд отдаёт наружу бизнес-данные (заметки, статусы по продавцам),
-        поэтому без пароля он не должен быть доступен. Пароль берётся из .env.
-        """
+    def _has_basic(self) -> bool:
+        """HTTP Basic — оставлен для скриптов, curl и автоматизации."""
         if not AUTH[1]:
-            return True
+            return False
         import base64
 
         header = self.headers.get("Authorization", "")
-        if header.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(header[6:]).decode("utf-8", "replace")
-                user, _, password = decoded.partition(":")
-                if user == AUTH[0] and password == AUTH[1]:
-                    return True
-            except Exception:                              # noqa: BLE001
-                pass
+        if not header.startswith("Basic "):
+            return False
+        try:
+            decoded = base64.b64decode(header[6:]).decode("utf-8", "replace")
+            user, _, password = decoded.partition(":")
+            return user == AUTH[0] and password == AUTH[1]
+        except Exception:                                  # noqa: BLE001
+            return False
 
-        # Тело — JSON, потому что все клиенты разбирают ответ как JSON. На
-        # текстовом теле интерфейс показывал «Ошибка сети: SyntaxError» вместо
-        # понятного «нужен вход».
-        body = json.dumps({"error": "Требуется вход"}, ensure_ascii=False).encode("utf-8")
+    def _serve_login(self, error: str = "") -> None:
+        page = LOGIN_PAGE.replace("__ERROR__", error)
+        body = page.encode("utf-8")
         self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="Ozon CRM"')
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _check_auth(self) -> bool:
+        """Проверяет доступ. Возвращает True, если запрос можно обработать.
+
+        Порядок: сессия в cookie, затем HTTP Basic (для скриптов). Если ни то,
+        ни другое — браузеру отдаём страницу входа с формой, а API-клиенту JSON.
+        Пароль берётся из .env; пустой пароль означает «авторизация выключена».
+        """
+        if not AUTH[1]:
+            return True
+
+        path = urlparse(self.path).path
+        # Сама страница входа и выход авторизации не требуют — иначе получился
+        # бы замкнутый круг: чтобы войти, нужно уже быть вошедшим
+        if path in ("/api/login", "/api/logout"):
+            return True
+
+        if self._has_session() or self._has_basic():
+            return True
+
+        wants_html = (
+            self.headers.get("Accept", "").find("text/html") >= 0
+            or path in ("/", "/index.html")
+        )
+        if wants_html:
+            self._serve_login()
+        else:
+            body = json.dumps({"error": "Требуется вход"}, ensure_ascii=False).encode("utf-8")
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         return False
 
     # --- утилиты ------------------------------------------------------------ #
@@ -1303,6 +1369,37 @@ class Handler(BaseHTTPRequestHandler):
         if not self._check_auth():
             return
         path = urlparse(self.path).path
+
+        # Вход и выход обрабатываем ДО разбора JSON: форма шлёт
+        # application/x-www-form-urlencoded, и общий разбор отклонял бы её
+        # как «некорректный JSON».
+
+        if path == "/api/login":
+            from urllib.parse import parse_qs
+            form_len = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(form_len).decode("utf-8", "replace") if form_len else ""
+            data = {k: v[0] for k, v in parse_qs(raw).items() if v}
+            if not AUTH[1] or data.get("password") == AUTH[1]:
+                body = "<meta http-equiv=\"refresh\" content=\"0;url=/\">".encode("utf-8")
+                self.send_response(303)
+                self.send_header("Set-Cookie",
+                                 f"{SESSION_COOKIE}={SESSION_TOKEN}; Path=/; HttpOnly; SameSite=Lax")
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return self._send_json({"ok": True})
+            return self._serve_login("Неверный пароль")
+
+        if path == "/api/logout":
+            self.send_response(303)
+            self.send_header("Set-Cookie",
+                             f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+            self.send_header("Location", "/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b"{}"
         try:

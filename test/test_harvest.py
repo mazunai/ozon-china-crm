@@ -199,6 +199,41 @@ class TestProductCache(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def _grid(self, ids) -> dict:
+        return {
+            "layout": [{
+                "stateId": "tileGridDesktop-1",
+                "component": "tileGrid-1",
+                "params": "{}",
+            }],
+            "widgetStates": {
+                "tileGridDesktop-1": json.dumps({"items": [{"id": i} for i in ids]}),
+            },
+        }
+
+    def test_collect_products_start_page_jumps(self):
+        """start_page не перечитывает предыдущие страницы раздела."""
+        client = FakeClient(pages={
+            SECTION_PATH: self._grid(["1", "2"]),
+            f"{SECTION_PATH}?page=2": self._grid(["3", "4"]),
+            f"{SECTION_PATH}?page=3": self._grid(["5", "6"]),
+            f"{SECTION_PATH}?page=4": self._grid(["7", "8"]),
+        })
+        harvester = ChinaSellerHarvester(client, store=self.store)
+
+        # со страницы 3: страницы 1-2 не запрашиваются вообще
+        ids = harvester.collect_products(SECTION_PATH, 2, start_page=3)
+        self.assertEqual(ids, ["5", "6", "7", "8"])
+        fetched = [key for kind, key in client.calls if kind == "page"]
+        self.assertEqual(fetched, [f"{SECTION_PATH}?page=3", f"{SECTION_PATH}?page=4"])
+
+        # первая страница ходит по голому пути (без ?page=), как и раньше
+        client2 = FakeClient(pages={SECTION_PATH: self._grid(["1"])})
+        harvester2 = ChinaSellerHarvester(client2, store=self.store)
+        ids2 = harvester2.collect_products(SECTION_PATH, 1)
+        self.assertEqual(ids2, ["1"])
+        self.assertEqual(client2.calls, [("page", SECTION_PATH)])
+
     def _seed(self):
         """Два известных продавца + запись в кэше товаров."""
         from src.outreach.scoring import SellerMetrics

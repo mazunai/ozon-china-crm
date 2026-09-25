@@ -623,10 +623,16 @@ class ChinaSellerHarvester:
             path = base + ("?" + "&".join(keep) if keep else "")
         return path
 
-    def collect_products(self, section_path: str, pages: int) -> List[str]:
-        """Собирает ID товаров из главного листинга раздела."""
+    def collect_products(self, section_path: str, pages: int, start_page: int = 1
+                     ) -> List[str]:
+        """Собирает ID товаров из главного листинга раздела.
+
+        start_page позволяет прыгнуть вглубь раздела, не перечитывая
+        предыдущие страницы: для больших обходов чанками (например «раздел
+        в 666 страниц за три прогона: 1-220, 221-440, 441-666»).
+        """
         product_ids: List[str] = []
-        for page_number in range(1, max(1, pages) + 1):
+        for page_number in range(start_page, start_page + max(1, pages)):
             if self.cancelled():
                 self.stats.cancelled = True
                 self._log(f"Отменено на странице {page_number}")
@@ -863,12 +869,15 @@ class ChinaSellerHarvester:
 
         return metrics
 
-    def run(self, section_url: str, pages: int = 10) -> HarvestStats:
-        """Полный проход: раздел -> товары -> продавцы -> база."""
-        section_path = self.path_from_url(section_url)
-        self._log(f"Раздел: {section_path}")
+    def run(self, section_url: str, pages: int = 10, start_page: int = 1) -> HarvestStats:
+        """Полный проход: раздел -> товары -> продавцы -> база.
 
-        product_ids = self.collect_products(section_path, pages)
+        start_page — начать со страницы N (см. collect_products).
+        """
+        section_path = self.path_from_url(section_url)
+        self._log(f"Раздел: {section_path}" + (f", начинаю со страницы {start_page}" if start_page > 1 else ""))
+
+        product_ids = self.collect_products(section_path, pages, start_page)
         if not product_ids:
             self._log("Товары не найдены — проверьте ссылку раздела")
             return self.stats

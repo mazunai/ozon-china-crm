@@ -246,26 +246,60 @@ LOGIN_PAGE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Вход — Ozon CRM</title>
 <style>
-  body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
-    background:#0f1115;color:#e6e9ef;font:15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}
-  form{background:#171a21;border:1px solid #262b35;border-radius:12px;padding:28px;width:320px}
-  h1{margin:0 0 6px;font-size:18px}
-  p{margin:0 0 18px;color:#8b93a1;font-size:13px}
-  input{width:100%;padding:10px 12px;border-radius:8px;border:1px solid #262b35;
-    background:#1d2129;color:#e6e9ef;font:inherit;font-size:14px}
-  input:focus{outline:none;border-color:#2f7cf6}
-  button{width:100%;margin-top:14px;padding:11px;border:none;border-radius:8px;
-    background:#2f7cf6;color:#fff;font:inherit;font-size:14px;cursor:pointer}
-  button:hover{background:#4a8cf7}
-  .err{margin-top:12px;color:#f87171;font-size:13px;min-height:18px}
+  :root{--bg1:#0d1017;--bg2:#101c2e;--accent:#2f7cf6;--accent2:#22d3ee;
+        --text:#e6e9ef;--dim:#8b93a1;--card:rgba(23,26,33,.72);--line:rgba(255,255,255,.08)}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    color:var(--text);padding:20px;
+    background:
+      radial-gradient(900px 480px at 15% -10%, rgba(47,124,246,.28), transparent 60%),
+      radial-gradient(700px 420px at 90% 110%, rgba(34,211,238,.16), transparent 60%),
+      linear-gradient(160deg, var(--bg1) 0%, var(--bg2) 100%)}
+  .wrap{width:340px;max-width:100%;animation:rise .5s cubic-bezier(.22,1,.36,1)}
+  @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+  .logo{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:16px}
+  .logo .mark{width:38px;height:38px;border-radius:12px;display:flex;align-items:center;
+    justify-content:center;font-size:19px;font-weight:700;color:#fff;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    box-shadow:0 6px 22px rgba(47,124,246,.45)}
+  .logo b{font-size:18px;letter-spacing:.2px}
+  form{background:var(--card);border:1px solid var(--line);border-radius:16px;
+    padding:26px 24px 22px;backdrop-filter:blur(10px);
+    box-shadow:0 24px 60px rgba(0,0,0,.45)}
+  h1{margin:0 0 4px;font-size:19px;font-weight:600}
+  p{margin:0 0 20px;color:var(--dim);font-size:13px}
+  label{display:block;font-size:12px;color:var(--dim);margin-bottom:6px}
+  input{width:100%;padding:11px 13px;border-radius:10px;border:1px solid var(--line);
+    background:rgba(13,16,23,.65);color:var(--text);font:inherit;font-size:14px;
+    transition:border-color .18s, box-shadow .18s}
+  input:focus{outline:none;border-color:var(--accent);
+    box-shadow:0 0 0 3px rgba(47,124,246,.22)}
+  button{width:100%;margin-top:16px;padding:12px;border:none;border-radius:10px;
+    background:linear-gradient(135deg,var(--accent),#4a8cf7);color:#fff;font:inherit;
+    font-size:14px;font-weight:600;cursor:pointer;letter-spacing:.2px;
+    transition:transform .12s, box-shadow .18s, filter .18s}
+  button:hover{filter:brightness(1.1);box-shadow:0 10px 26px rgba(47,124,246,.4)}
+  button:active{transform:translateY(1px)}
+  .err{margin-top:12px;color:#f87171;font-size:13px;min-height:18px;text-align:center}
+  .hint{margin-top:14px;text-align:center;color:var(--dim);font-size:12px}
+  .hint .dot{display:inline-block;width:8px;height:8px;border-radius:50%;
+    background:linear-gradient(135deg,#34d399,#22d3ee);margin-right:6px;vertical-align:-1px}
+  @media (max-width:420px){.wrap{width:100%}}
 </style></head><body>
-<form method="POST" action="/api/login">
-  <h1>Ozon CRM</h1>
-  <p>Введите пароль из файла .env</p>
-  <input type="password" name="password" autofocus autocomplete="current-password" placeholder="пароль">
-  <button type="submit">Войти</button>
-  <div class="err">__ERROR__</div>
-</form></body></html>"""
+<div class="wrap">
+  <div class="logo"><span class="mark">O</span><b>Ozon CRM</b></div>
+  <form method="POST" action="/api/login">
+    <h1>Вход в дашборд</h1>
+    <p>Панель китайских продавцов Ozon</p>
+    <label for="pw">Пароль</label>
+    <input type="password" id="pw" name="password" autofocus autocomplete="current-password" placeholder="пароль из .env">
+    <button type="submit">Войти</button>
+    <div class="err">__ERROR__</div>
+  </form>
+  <div class="hint"><span class="dot"></span>работает на вашей виртуалке, данные под защитой</div>
+</div>
+</body></html>"""
 
 # Раздел Ozon Global, откуда берутся китайские продавцы. Подставляется в форму
 # как значение по умолчанию — это и есть «та самая ссылка».
@@ -318,7 +352,10 @@ class HarvestRunner:
             url = (url or "").strip() or CHINA_SECTION_URL
             if "ozon.ru" not in url:
                 raise ValueError("Укажите ссылку на раздел Ozon")
-            pages = max(1, min(int(pages or 10), 200))
+            # Лимит 500 держим вровень с полем «страниц» в dashboard/web/index.html
+            # (max="500"); сам харвест страницы не ограничивает, обход останавливается
+            # сам, когда Ozon перестаёт отдавать новые товары.
+            pages = max(1, min(int(pages or 10), 500))
 
             # Занимаем браузер, пока сбор не закончится
             if not BROWSER_LOCK.acquire(blocking=False):
@@ -1289,6 +1326,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(SEND.preview_message(self._query().get("seller_id")))
         if path == "/api/summary":
             return self._send_json(CRUD.summary())
+        if path == "/api/stats":
+            # Сводка для вкладки «Обзор»: статусы продавцов, отправки по дням
+            # и лента последних сообщений.
+            from src.crm.store import STATUS_LABELS
+            store = CRUD.store()
+            return self._send_json({
+                "status_counts": store.status_counts(),
+                "sent_by_day": store.sent_by_day(days=15),
+                "recent": store.recent_messages(limit=14),
+                "status_labels": STATUS_LABELS,
+            })
         if path == "/api/seller/detail":
             seller_id = self._query().get("seller_id", "")
             detail = CRUD.detail(seller_id)

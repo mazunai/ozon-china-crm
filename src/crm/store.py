@@ -712,6 +712,49 @@ class SellerStore:
                 (seller_id, limit),
             ).fetchall()
 
+    def status_counts(self) -> Dict[str, int]:
+        """Сколько продавцов в каждом статусе — для обзора и диаграмм.
+
+        Считаем по всем записям (не только подтверждённым): статусы живут и
+        у отсеянных, и исключать их из статистики — путать тех, кому писали.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM sellers GROUP BY status"
+            ).fetchall()
+        return {r["status"]: int(r["n"]) for r in rows}
+
+    def sent_by_day(self, days: int = 14) -> List[dict]:
+        """Сколько real-отправок было в каждый из последних дней.
+
+        Даты в базе UTC; фронт показывает «сколько штук в день», а не часы,
+        поэтому смещение часового пояса не критично.
+        """
+        from datetime import timedelta
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(
+            timespec="seconds"
+        )
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT substr(sent_at, 1, 10) AS d, COUNT(*) AS n FROM messages "
+                "WHERE result = 'sent' AND sent_at >= ? GROUP BY d ORDER BY d",
+                (cutoff,),
+            ).fetchall()
+        return [{"date": r["d"], "count": int(r["n"])} for r in rows]
+
+    def recent_messages(self, limit: int = 12) -> List[dict]:
+        """Последние отправки с названием магазина — для ленты в обзоре."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT m.seller_id, m.text, m.sent_at, m.result, m.error, "
+                "       COALESCE(s.shop_name, '') AS shop_name "
+                "FROM messages m LEFT JOIN sellers s ON s.seller_id = m.seller_id "
+                "ORDER BY m.id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def requeue_failed(self, seller_ids: Optional[Sequence[str]] = None) -> int:
         """Возвращает в очередь тех, у кого была ошибка.
 

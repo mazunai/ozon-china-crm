@@ -3,62 +3,85 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0f1115">
+<meta name="theme-color" content="#0b0e14">
 <title>Ozon CRM — китайские продавцы</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   :root{
-    --bg:#0f1115; --card:#171a21; --card2:#1d2129; --line:#262b35;
-    --text:#e6e9ef; --dim:#8b93a1; --accent:#2f7cf6; --ok:#34d399;
-    --warn:#fbbf24; --err:#f87171; --purple:#b39ddb;
+    --bg:#0b0e14; --card:#151a23; --card2:#1c222e; --line:#2a3142;
+    --text:#e8ecf4; --dim:#93a0b4; --accent:#3b82f6; --accent2:#22d3ee;
+    --ok:#34d399; --info:#38bdf8; --warn:#fbbf24; --err:#f87171;
+    --purple:#a78bfa; --pink:#fb7185;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--text);
-    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  body{margin:0;color:var(--text);
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:
+      radial-gradient(1100px 560px at 88% -12%, rgba(59,130,246,.16), transparent 60%),
+      radial-gradient(900px 520px at -8% 22%, rgba(34,211,238,.10), transparent 55%),
+      radial-gradient(700px 400px at 50% 110%, rgba(167,139,250,.08), transparent 60%),
+      var(--bg);
+    background-attachment:fixed}
   a{color:var(--accent);text-decoration:none}
   a:hover{text-decoration:underline}
   .top{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
-    padding:14px 20px;background:var(--card);border-bottom:1px solid var(--line)}
-  .brand{font-weight:600;font-size:15px}
-  .pill{padding:3px 10px;border-radius:20px;font-size:12px;background:#232833;color:var(--dim)}
-  .pill.run{background:rgba(47,124,246,.18);color:#8ab4f8}
+    padding:14px 20px;background:rgba(21,26,35,.88);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line)}
+  .logo{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+    font-weight:800;font-size:15px;color:#fff;flex:0 0 auto;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    box-shadow:0 4px 14px rgba(59,130,246,.35)}
+  .brand{font-weight:700;font-size:15px;letter-spacing:.2px}
+  .pill{padding:3px 10px;border-radius:20px;font-size:12px;background:#232a38;color:var(--dim)}
+  .pill.run{background:rgba(59,130,246,.18);color:#8ab4f8}
+  .pill.done{background:rgba(52,211,153,.15);color:var(--ok)}
   .pill.err{background:rgba(248,113,113,.16);color:var(--err)}
   .summary{margin-left:auto;display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--dim)}
   .summary b{color:var(--text);font-weight:600}
-  nav{display:flex;gap:4px;padding:10px 20px 0;background:var(--card);
-    border-bottom:1px solid var(--line)}
+  nav{display:flex;gap:4px;padding:10px 20px 0;background:rgba(21,26,35,.88);
+    border-bottom:1px solid var(--line);backdrop-filter:blur(8px)}
   .tab{padding:9px 16px;border:none;background:transparent;color:var(--dim);
-    font:inherit;font-size:14px;cursor:pointer;border-bottom:2px solid transparent;border-radius:6px 6px 0 0}
+    font:inherit;font-size:14px;cursor:pointer;border-bottom:2px solid transparent;border-radius:6px 6px 0 0;
+    display:flex;align-items:center;gap:6px}
   .tab:hover{color:var(--text);background:rgba(255,255,255,.04)}
-  .tab.active{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+  .tab.active{color:var(--text);border-bottom-color:var(--accent);font-weight:600;
+    background:linear-gradient(180deg,rgba(59,130,246,.10),transparent)}
   .tab .badge{margin-left:6px;font-size:11px;color:var(--dim)}
+  .tab .badge.ok{color:var(--ok)}
   main{padding:18px 20px 60px;max-width:1900px}
   .view{display:none}
-  .view.active{display:block}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
-    padding:16px;margin-bottom:16px}
-  .card h2{margin:0 0 12px;font-size:15px;font-weight:600}
+  .view.active{display:block;animation:fadeUp .25s ease}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  .card{background:linear-gradient(180deg,rgba(26,32,45,.92),rgba(21,26,35,.92));
+    border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:16px;
+    box-shadow:0 2px 10px rgba(0,0,0,.18)}
+  .card h2{margin:0 0 12px;font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .card h2::before{content:"";width:4px;height:14px;border-radius:2px;
+    background:linear-gradient(180deg,var(--accent),var(--accent2))}
   .muted{color:var(--dim);font-size:12px}
   .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
   .row + .row{margin-top:10px}
   input[type=text],input[type=number],select,textarea{
     background:var(--card2);border:1px solid var(--line);color:var(--text);
-    border-radius:8px;padding:8px 10px;font:inherit;font-size:13px}
+    border-radius:9px;padding:8px 10px;font:inherit;font-size:13px}
   input[type=text]:focus,input[type=number]:focus,select:focus{outline:none;border-color:var(--accent)}
   input[type=text]{min-width:220px}
   input[type=number]{width:84px}
   button{background:var(--card2);border:1px solid var(--line);color:var(--text);
-    border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;cursor:pointer}
-  button:hover:not(:disabled){border-color:#3a4150}
+    border-radius:9px;padding:8px 14px;font:inherit;font-size:13px;cursor:pointer;transition:border-color .15s}
+  button:hover:not(:disabled){border-color:#3c4556}
   button:disabled{opacity:.45;cursor:default}
-  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-  button.primary:hover:not(:disabled){background:#4a8cf7}
+  button.primary{background:linear-gradient(135deg,var(--accent),#2563eb);border-color:transparent;color:#fff;
+    box-shadow:0 3px 12px rgba(37,99,235,.35)}
+  button.primary:hover:not(:disabled){filter:brightness(1.08)}
   button.danger{color:var(--err);border-color:rgba(248,113,113,.35)}
   button.ghost{background:transparent}
   label.check{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dim);cursor:pointer}
   .spacer{flex:1}
   .bar{height:6px;border-radius:3px;background:rgba(255,255,255,.08);overflow:hidden;margin-top:10px}
-  .bar .fill{height:100%;background:var(--accent);width:0;transition:width .3s}
-  .table-scroll{overflow:auto;border:1px solid var(--line);border-radius:10px;max-height:64vh}
+  .bar .fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));width:0;transition:width .3s}
+  .table-scroll{overflow:auto;border:1px solid var(--line);border-radius:12px;max-height:64vh;
+    background:rgba(15,19,28,.55)}
   table{border-collapse:separate;border-spacing:0;width:100%;font-size:13px}
   th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
   th{position:sticky;top:0;background:var(--card2);font-weight:600;font-size:12px;
@@ -67,23 +90,79 @@
   th.nosort{cursor:default}
   th .arrow{opacity:.6;font-size:10px;margin-left:3px}
   td.wrap{white-space:normal;max-width:340px}
-  tbody tr:hover{background:rgba(255,255,255,.025)}
-  tbody tr.selected{background:rgba(47,124,246,.09)}
+  tbody tr:hover{background:rgba(255,255,255,.03)}
+  tbody tr.selected{background:rgba(59,130,246,.10)}
   .empty{padding:44px 20px;text-align:center;color:var(--dim)}
   .pager{display:flex;align-items:center;gap:10px;margin-top:12px;font-size:13px;color:var(--dim)}
   .badge-verify{display:inline-block;font-size:11px;padding:1px 6px;border-radius:10px;
-    background:rgba(47,124,246,.15);color:#8ab4f8;margin-left:6px}
-  .badge-verify.warehouse{background:rgba(154,120,255,.15);color:var(--purple)}
+    background:rgba(59,130,246,.15);color:#8ab4f8;margin-left:6px}
+  .badge-verify.warehouse{background:rgba(167,139,250,.15);color:var(--purple)}
   .badge-verify.unverified{background:rgba(248,113,113,.18);color:var(--err);font-weight:600}
   .badge-multi{font-size:11px;padding:1px 6px;border-radius:10px;
     background:rgba(255,255,255,.08);color:var(--dim);margin-left:6px}
-  select.sel-status{font-size:12px;padding:4px 6px}
+
+  /* ---------- цветные статусы ---------- */
+  .st-new{--sc:#94a3b8}
+  .st-sending{--sc:#38bdf8}
+  .st-sent{--sc:#34d399}
+  .st-replied{--sc:#a78bfa}
+  .st-refused{--sc:#f87171}
+  .st-failed{--sc:#fbbf24}
+  .st-skipped{--sc:#64748b}
+  .st-opted_out{--sc:#fb7185}
+  select.sel-status{font-size:12px;padding:4px 6px;color:var(--sc);
+    border-color:color-mix(in srgb,var(--sc) 45%,transparent);
+    background:color-mix(in srgb,var(--sc) 9%,var(--card2))}
+  select.sel-status option{color:var(--text);background:var(--card2)}
+  .st-dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--sc);
+    box-shadow:0 0 8px color-mix(in srgb,var(--sc) 55%,transparent);margin-right:7px;vertical-align:1px}
+  .st-chip{display:inline-flex;align-items:center;font-size:11px;padding:2px 8px;border-radius:10px;
+    color:var(--sc);border:1px solid color-mix(in srgb,var(--sc) 40%,transparent);
+    background:color-mix(in srgb,var(--sc) 10%,transparent);white-space:nowrap}
+  .st-chip .st-dot{margin-right:5px;width:7px;height:7px}
   input.note-input{width:100%;min-width:150px;background:transparent;border-color:transparent;
     font-size:12px;padding:5px 6px}
   input.note-input:hover{border-color:var(--line)}
   input.note-input:focus{border-color:var(--accent);background:var(--card2)}
   input.note-input.dirty{border-color:var(--warn)}
   input.note-input.saving{border-color:var(--accent);opacity:.65}
+
+  /* ---------- KPI и графики ---------- */
+  .kp-blue{--sc:#3b82f6}
+  .kp-ok{--sc:#34d399}
+  .kp-err{--sc:#f87171}
+  .kp-purple{--sc:#a78bfa}
+  .metric-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px;margin-bottom:16px}
+  .kpi{border:1px solid var(--line);border-radius:14px;padding:13px 15px;text-align:left;cursor:pointer;
+    font:inherit;color:inherit;position:relative;overflow:hidden;background:var(--sc);
+    background:linear-gradient(180deg,color-mix(in srgb,var(--sc) 13%,#171c28),#131823);
+    transition:transform .15s,border-color .15s,box-shadow .15s}
+  .kpi::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;
+    background:linear-gradient(90deg,var(--sc),color-mix(in srgb,var(--sc) 30%,transparent))}
+  .kpi:hover:not(:disabled){transform:translateY(-2px);border-color:color-mix(in srgb,var(--sc) 55%,transparent);
+    box-shadow:0 8px 20px rgba(0,0,0,.3)}
+  .kpi:disabled{cursor:default}
+  .kpi .k-top{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px;margin-bottom:7px}
+  .kpi .k-num{font-size:23px;font-weight:800;line-height:1.1}
+  .kpi .k-sub{color:var(--dim);font-size:11px;margin-top:3px}
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+  .chart-wrap{position:relative;height:200px}
+  .fb-bar{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:12px}
+  .fb-track{flex:1;height:13px;background:rgba(255,255,255,.06);border-radius:7px;overflow:hidden}
+  .fb-fill{height:100%;border-radius:7px;background:linear-gradient(90deg,var(--sc,#3b82f6),color-mix(in srgb,var(--sc,#3b82f6) 40%,#22d3ee))}
+  .fb-count{width:38px;text-align:right;color:var(--text);font-weight:600;flex:0 0 auto}
+  .recent-item{display:flex;gap:10px;padding:9px 2px;border-bottom:1px solid var(--line);align-items:flex-start}
+  .recent-item:last-child{border-bottom:none}
+  .recent-shop{font-weight:600;font-size:13px}
+  .recent-text{color:var(--dim);font-size:12px;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;max-width:420px}
+  .recent-when{color:var(--dim);font-size:11px;flex:0 0 auto}
+  .status-map{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
+  .sm-row{display:flex;align-items:center;gap:8px;font-size:13px;padding:7px 10px;
+    border:1px solid var(--line);border-radius:10px;cursor:pointer;background:rgba(255,255,255,.02)}
+  .sm-row:hover{border-color:color-mix(in srgb,var(--sc,#3b82f6) 50%,transparent);
+    background:color-mix(in srgb,var(--sc,#3b82f6) 7%,transparent)}
+  .sm-row .sm-num{margin-left:auto;font-weight:700}
   .drawer{position:fixed;top:0;right:0;height:100%;width:580px;max-width:94vw;
     background:var(--card);border-left:1px solid var(--line);z-index:60;
     transform:translateX(102%);transition:transform .22s;overflow-y:auto;padding:20px}
@@ -92,17 +171,17 @@
   .drawer dl{display:grid;grid-template-columns:150px 1fr;gap:6px 12px;margin:14px 0;font-size:13px}
   .drawer dt{color:var(--dim)}
   .drawer dd{margin:0;word-break:break-word}
-  .reasons{background:var(--card2);border-radius:8px;padding:10px;font-size:12px;
+  .reasons{background:var(--card2);border-radius:9px;padding:10px;font-size:12px;
     color:var(--dim);white-space:pre-wrap;line-height:1.6}
-  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:55;display:none}
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:55;display:none}
   .overlay.open{display:block}
   .toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;
     gap:8px;z-index:80;max-width:420px}
   .toast{background:var(--card2);border:1px solid var(--line);border-left:3px solid var(--accent);
-    border-radius:8px;padding:10px 14px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+    border-radius:9px;padding:10px 14px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
   .toast.err{border-left-color:var(--err)}
   .toast.ok{border-left-color:var(--ok)}
-  .log{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:10px;
+  .log{background:#0b0e14;border:1px solid var(--line);border-radius:9px;padding:10px;
     height:320px;overflow-y:auto;font-family:ui-monospace,Menlo,monospace;font-size:12px;
     line-height:1.55;color:#c8cdd6}
   .log .ERROR{color:var(--err)}
@@ -140,9 +219,9 @@
     input[type=text].note-input{min-width:0}
     .table-scroll{display:none}
     .cards{display:block}
-    .card-seller{background:var(--card);border:1px solid var(--line);border-radius:10px;
+    .card-seller{background:var(--card);border:1px solid var(--line);border-radius:12px;
       padding:12px;margin-bottom:10px}
-    .card-seller.selected{background:rgba(47,124,246,.09);border-color:var(--accent)}
+    .card-seller.selected{background:rgba(59,130,246,.10);border-color:var(--accent)}
     .cs-top{display:flex;align-items:flex-start;gap:10px}
     .cs-top .rowChk{width:20px;height:20px;margin:3px 0 0;flex:0 0 auto;accent-color:var(--accent)}
     .cs-title{flex:1;min-width:0;word-break:break-word}
@@ -153,7 +232,12 @@
     .cs-meta b{color:var(--text)}
     .cs-actions{display:grid;grid-template-columns:1fr 1.4fr;gap:8px;margin-top:10px}
     .cs-actions select,.cs-actions input{min-width:0;width:100%;min-height:42px;
-      padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--card2)}
+      padding:9px 8px;border:1px solid var(--line);border-radius:9px;background:var(--card2)}
+    .metric-grid{grid-template-columns:repeat(auto-fill,minmax(135px,1fr));gap:9px}
+    .kpi{padding:11px 12px}
+    .kpi .k-num{font-size:20px}
+    .grid-2{grid-template-columns:1fr}
+    .chart-wrap{height:180px}
     .pager{flex-wrap:wrap;gap:8px}
     .pager button{flex:1 1 40%;min-height:44px}
     .pager select{flex:1 1 100%;min-height:44px}
@@ -167,12 +251,14 @@
     .bar{height:8px}
     .log{height:46vh;font-size:13px}
     .empty{padding:32px 14px}
+    .status-map{grid-template-columns:1fr 1fr}
   }
 </style>
 </head>
 <body>
 
 <header class="top">
+  <span class="logo">O</span>
   <span class="brand">Ozon CRM</span>
   <span class="pill" id="statusPill">Ожидание</span>
   <span class="summary">
@@ -185,14 +271,33 @@
 </header>
 
 <nav>
-  <button class="tab active" data-view="sellers">Продавцы <span class="badge" id="tabCountSellers"></span></button>
+  <button class="tab active" data-view="overview">Обзор</button>
+  <button class="tab" data-view="sellers">Продавцы <span class="badge" id="tabCountSellers"></span></button>
   <button class="tab" data-view="rejected">Отсеянные <span class="badge" id="tabCountRejected"></span></button>
   <button class="tab" data-view="harvest">Сбор</button>
   <button class="tab" data-view="send">Рассылка <span class="badge" id="tabCountSend"></span></button>
 </nav>
 
 <main>
-  <section class="view active" id="view-sellers">
+  <section class="view active" id="view-overview">
+    <div class="metric-grid" id="ovMetrics"></div>
+    <div class="grid-2">
+      <div class="card">
+        <h2>Отправки за 14 дней</h2>
+        <div class="chart-wrap"><canvas id="ovBar"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>Статусы рассылки</h2>
+        <div class="chart-wrap"><canvas id="ovDonut"></canvas></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Последние отправки</h2>
+      <div id="ovRecent"><div class="muted">Загрузка…</div></div>
+    </div>
+  </section>
+
+  <section class="view" id="view-sellers">
     <div class="card">
       <div class="row">
         <input type="text" id="fSearch" placeholder="Поиск: магазин, компания, USCC, провинция, заметка">
@@ -232,7 +337,7 @@
             <th data-sort="reviews" style="width:90px">Отзывы</th>
             <th data-sort="months_on_ozon" style="width:72px">Срок</th>
             <th data-sort="rating" style="width:70px">Рейтинг</th>
-            <th class="nosort" style="width:130px">Статус</th>
+            <th class="nosort" style="width:140px">Статус</th>
             <th class="nosort" style="width:190px">Заметка</th>
             <th class="nosort" style="width:92px"></th>
           </tr>
@@ -295,6 +400,12 @@
 
   <section class="view" id="view-send">
     <div class="card">
+      <h2>Статусы — кому что сделано</h2>
+      <div class="status-map" id="sendKpi"></div>
+      <div class="muted" style="margin-top:8px">Нажмите на статус — откроются продавцы с этим статусом.</div>
+    </div>
+
+    <div class="card">
       <div class="row">
         <h2 style="margin:0">Готовность к отправке</h2>
         <span class="spacer"></span>
@@ -317,7 +428,7 @@
         <textarea id="tplBody" rows="9" spellcheck="false"
           style="width:100%;font-family:ui-monospace,Menlo,monospace;
                  background:var(--card2);border:1px solid var(--line);color:var(--text);
-                 border-radius:8px;padding:12px;resize:vertical"></textarea>
+                 border-radius:9px;padding:12px;resize:vertical"></textarea>
       </div>
       <div class="row" style="margin-top:10px">
         <button class="primary" id="btnSaveTemplate">Сохранить текст</button>
@@ -473,6 +584,17 @@
   var STATUS_LABELS = {};
   var selected = new Set();
   var drafts = {};
+  var SUM = {};                       // последняя сводка из /api/summary
+  var STATS = {counts:{}, days:[], recent:[]};
+
+  // Порядок статусов для карточек и графика: сначала то, что важно в работе.
+  var STATUS_ORDER = ["new","sending","sent","replied","refused","failed","skipped","opted_out"];
+  var STATUS_HINT = {
+    new:"ещё не писали", sending:"идёт отправка", sent:"сообщение ушло",
+    replied:"ответил продавец", refused:"отказался", failed:"ошибка отправки",
+    skipped:"пропущен", opted_out:"просил не писать"
+  };
+  var RESULT_COLOR = {sent:"#34d399", error:"#f87171", failed:"#f87171"};
 
   /* ---------- вкладки ---------- */
   function showView(name){
@@ -482,8 +604,11 @@
     document.querySelectorAll(".view").forEach(function(v){
       v.classList.toggle("active", v.id === "view-" + name);
     });
+    if (location.hash !== "#" + name) { history.replaceState(null, "", "#" + name); }
+    window.scrollTo(0, 0);
     if (name === "sellers" || name === "rejected") { loadTable(name); }
     if (name === "send") { loadSend(); }
+    if (name === "overview") { loadStats(); }
   }
   document.querySelectorAll(".tab").forEach(function(t){
     t.addEventListener("click", function(){ showView(t.dataset.view); });
@@ -573,6 +698,14 @@
         esc(STATUS_LABELS[key]) + "</option>";
     }).join("");
   }
+  // Цветная точка статуса: сразу видно, кому написали, кто ответил.
+  function statusDot(status){
+    return '<span class="st-dot st-' + esc(status || "new") + '"></span>';
+  }
+  function statusChip(status){
+    return '<span class="st-chip st-' + esc(status || "new") + '">' + statusDot(status) +
+      esc(STATUS_LABELS[status] || status || "—") + "</span>";
+  }
 
   function sellerRowHtml(r){
     var badge = "";
@@ -586,15 +719,15 @@
     var checked = selected.has(r.seller_id) ? " checked" : "";
     return '<td><input type="checkbox" class="rowChk" data-seller="' + esc(r.seller_id) + '"' + checked + "></td>" +
       "<td><b>" + (r.score || 0).toFixed(1) + "</b></td>" +
-      "<td>" + esc(r.shop_name || r.seller_id) + badge + multi + "</td>" +
+      "<td>" + statusDot(r.status) + esc(r.shop_name || r.seller_id) + badge + multi + "</td>" +
       '<td class="wrap"><span class="muted">' + esc(r.company_name || "—") + "</span></td>" +
       "<td>" + esc(r.province || "—") + "</td>" +
       "<td>" + fmtNum(r.orders) + "</td>" +
       "<td>" + fmtNum(r.reviews) + "</td>" +
       "<td>" + (r.months_on_ozon || 0) + " мес</td>" +
       "<td>" + (r.rating || 0).toFixed(1) + "</td>" +
-      '<td><select class="sel-status" data-seller="' + esc(r.seller_id) + '">' +
-        statusOptions(r.status) + "</select></td>" +
+      '<td><select class="sel-status st-' + esc(r.status || "new") + '" data-seller="' +
+        esc(r.seller_id) + '">' + statusOptions(r.status) + "</select></td>" +
       '<td><input class="note-input" data-seller="' + esc(r.seller_id) + '" value="' +
         esc(note) + '" placeholder="заметка…"></td>' +
       '<td><a href="' + esc(profile) + '" target="_blank" rel="noopener">профиль ↗</a></td>';
@@ -659,10 +792,10 @@
         '<a class="cs-link" href="' + esc(profile) + '" target="_blank" rel="noopener" ' +
           'aria-label="профиль на Ozon">↗</a>' +
       "</div>" +
-      '<div class="cs-meta">' + meta.join(" · ") + "</div>" +
+      '<div class="cs-meta">' + statusChip(r.status) + " · " + meta.join(" · ") + "</div>" +
       '<div class="cs-actions">' +
-        '<select class="sel-status" data-seller="' + esc(r.seller_id) + '">' +
-          statusOptions(r.status) + "</select>" +
+        '<select class="sel-status st-' + esc(r.status || "new") + '" data-seller="' +
+          esc(r.seller_id) + '">' + statusOptions(r.status) + "</select>" +
         '<input class="note-input" data-seller="' + esc(r.seller_id) + '" value="' +
           esc(note) + '" placeholder="заметка…">' +
       "</div>" +
@@ -800,7 +933,13 @@
     var sel = closestTo(ev.target, "select.sel-status");
     if (sel) {
       postJson("/api/seller/status", {seller_id: sel.dataset.seller, status: sel.value})
-        .then(function(){ toast("Статус сохранён", "ok"); })
+        .then(function(){
+          toast("Статус: " + (STATUS_LABELS[sel.value] || sel.value), "ok");
+          // Перекрашиваем на месте — в списке сразу видно новую отметку.
+          STATUS_ORDER.forEach(function(s){ sel.classList.remove("st-" + s); });
+          sel.classList.add("st-" + sel.value);
+          loadStats();
+        })
         .catch(function(err){
           toast("Статус не сохранён: " + err.message, "err");
           loadTable("sellers");
@@ -840,6 +979,7 @@
       toast((status === "new" ? "Возвращено в очередь: " : "Статус обновлён: ") + ids.length, "ok");
       selected.clear();
       loadTable("sellers");
+      loadStats();
     }).catch(function(err){ toast("Не удалось: " + err.message, "err"); });
   }
 
@@ -881,6 +1021,7 @@
         ];
         var html = "<h3>" + esc(d.shop_name || d.seller_id) + "</h3>" +
           '<div class="muted">' + esc(d.seller_id) + " · " + esc(tier) + "</div>" +
+          '<div style="margin-top:6px">' + statusChip(d.status) + "</div>" +
           "<dl>" + pairs.map(function(p){
             return "<dt>" + esc(p[0]) + "</dt><dd>" + esc(p[1]) + "</dd>";
           }).join("") + "</dl>";
@@ -987,6 +1128,200 @@
     if (near) { box.scrollTop = box.scrollHeight; }
   }
 
+  /* ---------- обзор: цифры и графики ---------- */
+  var chartBar = null, chartDonut = null;
+
+  function kpiCard(cls, label, value, sub, status){
+    var tag = status ? "button" : "div";
+    return "<" + tag + ' class="kpi ' + cls + '"' +
+      (status ? ' data-status="' + esc(status) + '" title="Показать продавцов с этим статусом"' : "") + ">" +
+      '<div class="k-top">' + (status ? statusDot(status) : "") + esc(label) + "</div>" +
+      '<div class="k-num">' + fmtNum(value) + "</div>" +
+      (sub ? '<div class="k-sub">' + esc(sub) + "</div>" : "") +
+      "</" + tag + ">";
+  }
+
+  function renderOverview(){
+    var c = STATS.counts || {};
+    STATS.total = STATUS_ORDER.reduce(function(acc, s){ return acc + (c[s] || 0); }, 0);
+    var html = "";
+    html += kpiCard("st-new", "В очереди", c.new || 0, STATUS_HINT.new, "new");
+    html += kpiCard("st-sent", "Написали", c.sent || 0, STATUS_HINT.sent, "sent");
+    html += kpiCard("st-replied", "Ответили", c.replied || 0, STATUS_HINT.replied, "replied");
+    html += kpiCard("st-refused", "Отказ", c.refused || 0, STATUS_HINT.refused, "refused");
+    html += kpiCard("st-failed", "Ошибки", c.failed || 0, STATUS_HINT.failed, "failed");
+    html += kpiCard("st-opted_out", "Не писать", c.opted_out || 0, STATUS_HINT.opted_out, "opted_out");
+    html += kpiCard("st-sending", "Отправляется", c.sending || 0, STATUS_HINT.sending, "sending");
+    html += kpiCard("st-skipped", "Пропущены", c.skipped || 0, STATUS_HINT.skipped, "skipped");
+    html += kpiCard("kp-blue", "Всего в базе", STATS.total, "все записи");
+    html += kpiCard("kp-ok", "Подтверждено", SUM.verified, "USCC и склад");
+    html += kpiCard("kp-err", "Отсеяно", SUM.rejected, "не подтверждены");
+    html += kpiCard("kp-purple", "Провинций", SUM.provinces, "регионов Китая");
+    $("ovMetrics").innerHTML = html;
+    renderSendKpi();
+  }
+
+  function renderSendKpi(){
+    var c = STATS.counts || {};
+    var has = STATUS_ORDER.filter(function(s){ return (c[s] || 0) > 0; });
+    var list = has.length ? has : STATUS_ORDER;
+    $("sendKpi").innerHTML = list.map(function(s){
+      return '<div class="sm-row st-' + s + '" data-status="' + s + '">' + statusDot(s) +
+        '<span>' + esc(STATUS_LABELS[s] || s) + "</span>" +
+        '<span class="sm-num">' + fmtNum(c[s] || 0) + "</span></div>";
+    }).join("");
+  }
+
+  // Полоски без библиотеки: тот же смысл, если CDN недоступен.
+  function fallbackBars(canvas, items){
+    var box = canvas.parentNode;
+    canvas.style.display = "none";
+    var old = box.querySelector(".fb-list");
+    if (old) { old.remove(); }
+    if (!items.length) {
+      box.insertAdjacentHTML("beforeend", '<div class="fb-list muted">Данных пока нет</div>');
+      return;
+    }
+    var max = Math.max.apply(null, items.map(function(i){ return i.count; })) || 1;
+    box.insertAdjacentHTML("beforeend", '<div class="fb-list">' + items.map(function(i){
+      return '<div class="fb-bar ' + (i.cls || "") + '"><span style="width:64px;color:var(--dim)">' +
+        esc(i.label) + '</span><span class="fb-track"><span class="fb-fill" style="width:' +
+        Math.round(i.count / max * 100) + '%"></span></span><span class="fb-count">' +
+        fmtNum(i.count) + "</span></div>";
+    }).join("") + "</div>");
+  }
+
+  function colorOf(status){
+    var probe = document.createElement("span");
+    probe.className = "st-" + status;
+    probe.style.display = "none";
+    document.body.appendChild(probe);
+    var rgb = getComputedStyle(probe).getPropertyValue("--sc").trim();
+    probe.remove();
+    return rgb || "#3b82f6";
+  }
+
+  function renderCharts(){
+    var days = STATS.days || [];
+    var labels = days.map(function(d){
+      var p = String(d.date || "").split("-");
+      return p.length === 3 ? (p[2] + "." + p[1]) : d.date;
+    });
+    var values = days.map(function(d){ return d.count; });
+
+    var counts = STATS.counts || {};
+    var stKeys = STATUS_ORDER.filter(function(s){ return (counts[s] || 0) > 0; });
+    var stLabels = stKeys.map(function(s){ return STATUS_LABELS[s] || s; });
+    var stValues = stKeys.map(function(s){ return counts[s] || 0; });
+    var stColors = stKeys.map(colorOf);
+
+    if (!window.Chart) {
+      fallbackBars($("ovBar"), days.map(function(d, i){ return {label: labels[i], count: d.count}; }));
+      fallbackBars($("ovDonut"), stKeys.map(function(s){
+        return {label: STATUS_LABELS[s] || s, count: counts[s] || 0, cls: "st-" + s};
+      }));
+      return;
+    }
+
+    var grid = {color:"rgba(255,255,255,.06)"};
+    var font = {family:"-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif", size:11};
+    // На телефоне легенда справа не помещается — уводим её под диаграмму.
+    var narrow = window.innerWidth < 700;
+
+    if (chartBar) { chartBar.destroy(); chartBar = null; }
+    if (days.length) {
+      $("ovBar").style.display = "";
+      var stale = $("ovBar").parentNode.querySelector(".fb-list");
+      if (stale) { stale.remove(); }
+      var ctx = $("ovBar").getContext("2d");
+      var grad = ctx.createLinearGradient(0, 0, 0, 190);
+      grad.addColorStop(0, "rgba(59,130,246,.95)");
+      grad.addColorStop(1, "rgba(34,211,238,.35)");
+      chartBar = new Chart(ctx, {
+        type:"bar",
+        data:{labels: labels, datasets:[{label:"Отправлено", data: values, backgroundColor: grad,
+          borderRadius: 5, borderSkipped: false, maxBarThickness: 26}]},
+        options:{responsive:true, maintainAspectRatio:false, animation:{duration:400},
+          plugins:{legend:{display:false}, tooltip:{callbacks:{label:function(c){
+            return "Отправлено: " + c.parsed.y; }}}},
+          scales:{x:{grid:{display:false}, ticks:{color:"#93a0b4", font:font}},
+                  y:{beginAtZero:true, grid:grid, ticks:{color:"#93a0b4", font:font, precision:0}}}}
+      });
+    } else {
+      fallbackBars($("ovBar"), []);
+    }
+
+    if (chartDonut) { chartDonut.destroy(); chartDonut = null; }
+    if (stKeys.length) {
+      $("ovDonut").style.display = "";
+      chartDonut = new Chart($("ovDonut").getContext("2d"), {
+        type:"doughnut",
+        data:{labels: stLabels, datasets:[{data: stValues, backgroundColor: stColors,
+          borderColor:"#151a23", borderWidth:3, hoverOffset:6}]},
+        options:{responsive:true, maintainAspectRatio:false, cutout:"62%", animation:{duration:400},
+          plugins:{legend:{position:(narrow ? "bottom" : "right"), labels:{color:"#93a0b4", boxWidth:9, boxHeight:9,
+            usePointStyle:true, pointStyle:"circle", font:font}}}}
+      });
+    } else {
+      fallbackBars($("ovDonut"), []);
+    }
+  }
+
+  function renderRecent(){
+    var rows = STATS.recent || [];
+    if (!rows.length) {
+      $("ovRecent").innerHTML = '<div class="muted">Отправок ещё не было.</div>';
+      return;
+    }
+    $("ovRecent").innerHTML = rows.map(function(m){
+      var color = RESULT_COLOR[m.result] || "#3b82f6";
+      var mark = m.result === "sent" ? "" :
+        ' <span class="st-chip" style="--sc:' + color + '">' + esc(m.result === "error" ? "ошибка" : m.result) + "</span>";
+      return '<div class="recent-item">' +
+        '<span class="st-dot st-' + (m.result === "sent" ? "sent" : "failed") + '"></span>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div class="recent-shop">' + esc(m.shop_name || m.seller_id) + mark + "</div>" +
+          '<div class="recent-text">' + esc(String(m.text || "").slice(0, 160)) + "</div>" +
+        "</div>" +
+        '<span class="recent-when">' + esc(fmtDate(m.sent_at)) + "</span>" +
+      "</div>";
+    }).join("");
+  }
+
+  function loadStats(){
+    return fetch("/api/stats").then(function(r){ return r.json(); }).then(function(d){
+      if (d.error) { return; }
+      STATUS_LABELS = d.status_labels || STATUS_LABELS;
+      STATS.counts = d.status_counts || {};
+      STATS.days = d.sent_by_day || [];
+      STATS.recent = d.recent || [];
+      renderOverview();
+      renderCharts();
+      renderRecent();
+    }).catch(function(){});
+  }
+
+  // Клик по карточке статуса: показываем продавцов с этим статусом.
+  document.addEventListener("click", function(ev){
+    var k = closestTo(ev.target, ".kpi[data-status], .sm-row[data-status]");
+    if (!k) { return; }
+    goStatus(k.dataset.status);
+  });
+
+  function goStatus(status){
+    $("fSearch").value = "";
+    $("fProvince").value = "";
+    $("fTier").value = "";
+    $("fStatus").value = status;
+    $("fPageSize").value = "25";
+    var t = T.sellers;
+    t.search = ""; t.provinces = []; t.tier = ""; t.statuses = [status];
+    t.order_by = "score"; t.order = "desc"; t.offset = 0; t.limit = 25;
+    showView("sellers");
+    loadTable("sellers");
+    toast("Показаны: " + (STATUS_LABELS[status] || status), "ok");
+  }
+
   /* ---------- события сервера ---------- */
   function connect(){
     var es = new EventSource("/api/events");
@@ -999,6 +1334,7 @@
         renderSendState(ev);
         if (ev.last_event && ev.last_event.kind === "sent") {
           toast("Отправлено: " + (ev.last_event.shop || ""), "ok");
+          loadStats();
         }
       }
       else if (ev.type === "send_done") {
@@ -1007,6 +1343,7 @@
         if (ev.error) { toast("Отправка не удалась: " + ev.error, "err"); }
         loadSend();
         loadTable("sellers");
+        loadStats();
       }
       else if (ev.type === "harvest_done") {
         applyHarvest({running:false, progress:100, phase:"Готово", stats:ev.stats || {}, error:ev.error || ""});
@@ -1018,6 +1355,7 @@
         selected.clear();
         loadTable("sellers");
         loadSummary();
+        loadStats();
       }
     };
     es.onerror = function(){ es.close(); setTimeout(connect, 3000); };
@@ -1026,12 +1364,14 @@
   function loadSummary(){
     fetch("/api/summary").then(function(r){ return r.json(); }).then(function(d){
       if (d.error) { return; }
+      SUM = d;
       $("sumVerified").textContent = fmtNum(d.verified);
       $("sumRejected").textContent = fmtNum(d.rejected);
       $("sumProvinces").textContent = fmtNum(d.provinces);
       $("sumHarvest").textContent = d.last_seen_at ? fmtDate(d.last_seen_at) : "—";
       $("sumBackup").textContent = d.last_backup_at
         ? fmtDate(new Date(d.last_backup_at * 1000).toISOString()) : "нет";
+      if ($("view-overview").classList.contains("active")) { renderOverview(); }
     }).catch(function(){});
   }
 
@@ -1042,8 +1382,14 @@
     debounceTimers[key] = setTimeout(function(){ fn(key); }, 250);
   }
 
-  $("fSearch").addEventListener("input", function(){ T.sellers.offset = 0; debounce(loadTable, "sellers"); });
-  $("rSearch").addEventListener("input", function(){ T.rejected.offset = 0; debounce(loadTable, "rejected"); });
+  // При повороте телефона графики пересобираем: иначе легенда остаётся там,
+  // где была при загрузке, и обрезается по краю.
+  window.addEventListener("resize", function(){
+    clearTimeout(debounceTimers.charts);
+    debounceTimers.charts = setTimeout(renderCharts, 300);
+  });
+
+  $("fSearch").addEventListener("input", function(){ T.sellers.offset = 0; debounce(loadTable, "sellers"); });  $("rSearch").addEventListener("input", function(){ T.rejected.offset = 0; debounce(loadTable, "rejected"); });
   ["fStatus","fProvince","fTier"].forEach(function(id){
     $(id).addEventListener("change", function(){ T.sellers.offset = 0; loadTable("sellers"); });
   });
@@ -1061,7 +1407,7 @@
     document.querySelectorAll("#view-sellers th .arrow").forEach(function(a){ a.remove(); });
     loadTable("sellers");
   });
-  $("btnReload").addEventListener("click", function(){ loadTable("sellers"); loadSummary(); });
+  $("btnReload").addEventListener("click", function(){ loadTable("sellers"); loadSummary(); loadStats(); });
   $("rReload").addEventListener("click", function(){ loadTable("rejected"); });
   $("btnPrev").addEventListener("click", function(){ page("sellers", -1); });
   $("btnNext").addEventListener("click", function(){ page("sellers", 1); });
@@ -1094,6 +1440,7 @@
         selected.clear();
         loadTable("sellers");
         loadSummary();
+        loadStats();
       })
       .catch(function(err){ toast("Не удалось удалить: " + err.message, "err"); });
   });
@@ -1121,7 +1468,7 @@
     postJson("/api/sellers/purge", {seller_ids: ids}).then(function(res){
       toast("Удалено: " + (res.deleted || 0), "ok");
       selected.clear();
-      loadTable("rejected"); loadSummary();
+      loadTable("rejected"); loadSummary(); loadStats();
     }).catch(function(err){ toast("Не удалось удалить: " + err.message, "err"); });
   });
   $("btnHarvest").addEventListener("click", function(){
@@ -1156,11 +1503,12 @@
     var html = "";
     (pf.checks || []).forEach(function(c){
       var mark = c.ok ? "✓" : (c.blocking ? "✕" : "!");
-      var color = c.ok ? "var(--ok)" : (c.blocking ? "var(--err)" : "var(--warn)");
-      html += '<div class="row" style="align-items:flex-start;margin-bottom:6px">' +
-        '<span style="color:' + color + ';width:16px">' + mark + "</span>" +
+      var cls = c.ok ? "st-sent" : (c.blocking ? "st-refused" : "st-failed");
+      html += '<div class="row st-row" style="align-items:flex-start;margin-bottom:8px">' +
+        '<span class="st-chip ' + cls + '" style="min-width:22px;justify-content:center">' +
+          esc(mark) + "</span>" +
         '<b style="min-width:170px">' + esc(c.title) + "</b>" +
-        '<span class="muted">' + esc(c.detail) + "</span></div>";
+        '<span class="muted" style="flex:1;min-width:180px">' + esc(c.detail) + "</span></div>";
     });
     if (pf.template_error) {
       html += '<div class="muted" style="color:var(--warn);margin-top:8px">' + esc(pf.template_error) + "</div>";
@@ -1169,7 +1517,8 @@
     $("sendPill").className = "pill " + (pf.ready ? "done" : "err");
     $("sendPill").textContent = pf.ready ? "Готово" : "Не готово";
     $("sendLimitInfo").textContent = "отправлено сегодня " + (pf.sent_today || 0) +
-      " из " + (pf.daily_cap || 0);
+      " из " + (pf.daily_cap || 0) + " — остаток " +
+      Math.max(0, (pf.daily_cap || 0) - (pf.sent_today || 0));
   }
 
   function renderSendState(st){
@@ -1208,10 +1557,13 @@
       return d.preflight;
     }).then(function(pf){
       $("tabCountSend").textContent = pf && pf.ready ? "готово" : "";
+      $("tabCountSend").className = "badge" + (pf && pf.ready ? " ok" : "");
+      if (pf && pf.ready) { $("sendPill").className = "pill done"; }
     }).catch(function(err){
       $("sendChecks").innerHTML = '<div class="muted" style="color:var(--err)">Не удалось получить состояние: ' +
         esc(err.message) + "</div>";
     });
+    loadStats();
   }
 
   $("btnSendRefresh").addEventListener("click", loadSend);
@@ -1306,18 +1658,18 @@
       toast("Не удалось: " + err.message, "err");
     });
   });
-    $("btnSendLive").addEventListener("click", function(){
-      var limit = parseInt($("sLimit").value, 10) || 0;
-      var head = limit ? ("Отправить до " + limit + " сообщений?") : "Запустить рассылку?";
-      var warn = "Сообщения уйдут настоящим продавцам. Проверьте, что шаблон готов, " +
-                 "разметка чата снята и вы вошли в Ozon в профиле парсера. " +
-                 "Отправка идёт с паузами и в рабочем окне.";
-      if (!confirm(head + "\n\n" + warn)) { return; }
-      postJson("/api/send", {dry_run: false, limit: limit || null}).then(function(){
-        toast(limit ? ("Запущено, не больше " + limit) : "Отправка запущена", "ok");
-        loadSend();
-      }).catch(function(err){ toast("Не удалось запустить: " + err.message, "err"); });
-    });
+  $("btnSendLive").addEventListener("click", function(){
+    var limit = parseInt($("sLimit").value, 10) || 0;
+    var head = limit ? ("Отправить до " + limit + " сообщений?") : "Запустить рассылку?";
+    var warn = "Сообщения уйдут настоящим продавцам. Проверьте, что шаблон готов, " +
+               "разметка чата снята и вы вошли в Ozon в профиле парсера. " +
+               "Отправка идёт с паузами и в рабочем окне.";
+    if (!confirm(head + "\n\n" + warn)) { return; }
+    postJson("/api/send", {dry_run: false, limit: limit || null}).then(function(){
+      toast(limit ? ("Запущено, не больше " + limit) : "Отправка запущена", "ok");
+      loadSend();
+    }).catch(function(err){ toast("Не удалось запустить: " + err.message, "err"); });
+  });
   $("btnSendStop").addEventListener("click", function(){
     postJson("/api/send/stop", {}).then(function(){
       toast("Останавливаю…");
@@ -1342,10 +1694,12 @@
   }).catch(function(){});
 
   loadSummary();
+  loadStats();
+  var views = ["overview","sellers","rejected","harvest","send"];
   var initial = (location.hash || "").replace("#", "");
-  showView(["sellers","rejected","harvest","send"].indexOf(initial) >= 0 ? initial : "sellers");
+  showView(views.indexOf(initial) >= 0 ? initial : "overview");
   connect();
-  setInterval(loadSummary, 60000);
+  setInterval(function(){ loadSummary(); loadStats(); }, 60000);
 })();
 </script>
 </body>

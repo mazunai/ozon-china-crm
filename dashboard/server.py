@@ -1246,6 +1246,31 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
 
+        if path == "/api/sellers/delete":
+            ids = data.get("seller_ids") or []
+            if not isinstance(ids, list) or not ids:
+                return self._send_json({"error": "Не выбрано ни одной записи"}, 400)
+            allow_verified = bool(data.get("allow_verified"))
+            store = CRUD.store()
+            targets = [str(x) for x in ids]
+
+            # Подтверждённых без явного разрешения не удаляем: это собранная
+            # база, и случайное выделение не должно её сносить. Считаем, сколько
+            # таких, и просим подтвердить отдельно.
+            all_rows = store.list_sellers(limit=1_000_000, include_unverified=True)
+            by_id = {r["seller_id"]: r["verified_by"] for r in all_rows}
+            verified = [x for x in targets
+                        if by_id.get(x) in ("uscc", "warehouse")]
+            if verified and not allow_verified:
+                return self._send_json({
+                    "error": f"Среди выбранных {len(verified)} подтверждённых продавцов",
+                    "verified_count": len(verified),
+                    "need_confirm": True,
+                }, 409)
+
+            deleted = store.delete_sellers(targets)
+            return self._send_json({"deleted": deleted, "verified_deleted": len(verified)})
+
         if path == "/api/sellers/purge":
             ids = data.get("seller_ids") or []
             if not isinstance(ids, list) or not ids:

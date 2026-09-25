@@ -154,6 +154,7 @@
         <select id="bulkStatus"><option value="">— сменить статус —</option></select>
         <button class="ghost" id="btnBulkApply">Применить</button>
         <button class="ghost" id="btnBulkQueue">Вернуть в очередь</button>
+        <button class="danger" id="btnBulkDelete">Удалить</button>
         <button class="ghost" id="btnBulkClear">Снять выделение</button>
       </div>
     </div>
@@ -353,6 +354,13 @@
     return d.toLocaleDateString("ru-RU", {day:"2-digit", month:"2-digit"}) + " " +
            d.toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"});
   }
+  // Безопасный поиск ближайшего элемента: у keydown с целью document метода
+  // closest нет, и обработчик падал с TypeError — из-за этого не срабатывали
+  // клавиатурные сокращения.
+  function closestTo(target, selector){
+    return (target && typeof target.closest === "function") ? target.closest(selector) : null;
+  }
+
   function postJson(url, payload){
     return fetch(url, {
       method:"POST",
@@ -588,7 +596,7 @@
   }
 
   document.addEventListener("input", function(ev){
-    var input = ev.target.closest("input.note-input");
+    var input = closestTo(ev.target, "input.note-input");
     if (!input) { return; }
     var id = input.dataset.seller;
     drafts[id] = input.value;
@@ -598,7 +606,7 @@
   });
 
   document.addEventListener("blur", function(ev){
-    var input = ev.target.closest("input.note-input");
+    var input = closestTo(ev.target, "input.note-input");
     if (!input) { return; }
     var id = input.dataset.seller;
     clearTimeout(noteTimers[id]);
@@ -606,7 +614,7 @@
   }, true);
 
   document.addEventListener("keydown", function(ev){
-    var input = ev.target.closest("input.note-input");
+    var input = closestTo(ev.target, "input.note-input");
     if (input && ev.key === "Enter") {
       ev.preventDefault();
       clearTimeout(noteTimers[input.dataset.seller]);
@@ -615,7 +623,7 @@
       return;
     }
     if (ev.key === "Escape") { closeDrawer(); }
-    if (ev.key === "/" && !ev.target.closest("input,textarea,select")) {
+    if (ev.key === "/" && !closestTo(ev.target, "input,textarea,select")) {
       ev.preventDefault();
       var active = document.querySelector(".view.active");
       if (active && active.id === "view-sellers") { $("fSearch").focus(); }
@@ -634,7 +642,7 @@
 
   /* ---------- статусы, выделение ---------- */
   document.addEventListener("change", function(ev){
-    var sel = ev.target.closest("select.sel-status");
+    var sel = closestTo(ev.target, "select.sel-status");
     if (sel) {
       postJson("/api/seller/status", {seller_id: sel.dataset.seller, status: sel.value})
         .then(function(){ toast("Статус сохранён", "ok"); })
@@ -644,7 +652,7 @@
         });
       return;
     }
-    var chk = ev.target.closest("input.rowChk");
+    var chk = closestTo(ev.target, "input.rowChk");
     if (chk) {
       if (chk.checked) { selected.add(chk.dataset.seller); } else { selected.delete(chk.dataset.seller); }
       var row = chk.closest("tr");
@@ -774,9 +782,9 @@
 
   // Клик по строке открывает карточку, но не мешает полям внутри
   document.addEventListener("click", function(ev){
-    var row = ev.target.closest("tbody tr");
+    var row = closestTo(ev.target, "tbody tr");
     if (!row) { return; }
-    if (ev.target.closest("input,select,a,button")) { return; }
+    if (closestTo(ev.target, "input,select,a,button")) { return; }
     openDrawer(row.dataset.seller);
   });
 
@@ -901,6 +909,34 @@
   $("rNext").addEventListener("click", function(){ page("rejected", 1); });
   $("btnBulkApply").addEventListener("click", function(){ bulk("status", $("bulkStatus").value); });
   $("btnBulkQueue").addEventListener("click", function(){ bulk("status", "new"); });
+
+  $("btnBulkDelete").addEventListener("click", function(){
+    var ids = Array.from(selected);
+    if (!ids.length) { toast("Ничего не выбрано"); return; }
+
+    var unverified = T.sellers.rows.filter(function(r){
+      return selected.has(r.seller_id) && r.verified_by !== "uscc" && r.verified_by !== "warehouse";
+    }).length;
+    var verified = ids.length - unverified;
+
+    var question = "Удалить " + ids.length + " записей?";
+    if (verified) {
+      question += "\n\nВнимание: среди них " + verified + " ПОДТВЕРЖДЁННЫХ — " +
+        "это собранная база, восстановить её можно только из бэкапа.";
+    }
+    question += "\n\nОтменить это будет нельзя. Совет: сначала снимите копию командой\n" +
+      "python tools/backup_db.py";
+    if (!confirm(question)) { return; }
+
+    postJson("/api/sellers/delete", {seller_ids: ids, allow_verified: true})
+      .then(function(res){
+        toast("Удалено: " + (res.deleted || 0), "ok");
+        selected.clear();
+        loadTable("sellers");
+        loadSummary();
+      })
+      .catch(function(err){ toast("Не удалось удалить: " + err.message, "err"); });
+  });
   $("btnBulkClear").addEventListener("click", function(){
     selected.clear(); renderTable("sellers"); renderTable("rejected");
   });

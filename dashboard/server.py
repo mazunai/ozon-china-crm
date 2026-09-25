@@ -647,6 +647,9 @@ class SendRunner:
             self.state.update({
                 "running": True, "phase": "Запуск", "sent": 0, "failed": 0,
                 "error": "", "dry_run": config.dry_run, "last_event": {},
+                # Причину остановки прошлого прогона чистим обязательно: иначе
+                # новый запуск с первой секунды показывал бы «остановлено вручную»
+                "stopped_reason": "",
                 "limit": limit, "started_at": time.time(), "finished_at": None,
             })
 

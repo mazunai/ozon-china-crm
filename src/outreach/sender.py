@@ -202,14 +202,31 @@ class ChatClient:
     def _find(self, selector: str):
         from selenium.webdriver.common.by import By
 
-        by, value = selector.split("|", 1) if "|" in selector else ("css", selector)
+        # Поддерживаем две формы: "text|Написать" и "text=Написать".
+        # Вторая не разбиралась вообще: строка целиком уходила как CSS-селектор
+        # и chromedriver отклонял её как некорректную — из-за этого кнопка
+        # «Написать» не находилась, и первая отправка падала.
+        if "|" in selector:
+            by, value = selector.split("|", 1)
+        elif "=" in selector and selector.split("=", 1)[0] in ("css", "xpath", "text"):
+            by, value = selector.split("=", 1)
+        else:
+            by, value = "css", selector
         mapping = {
             "css": By.CSS_SELECTOR,
             "xpath": By.XPATH,
             "text": By.XPATH,  # text=Условия -> //*[contains(text(), ...)]
         }
         if by == "text":
-            value = f"//*[contains(normalize-space(text()), {json.dumps(value)})]"
+            # ensure_ascii=False обязателен: json.dumps по умолчанию превращает
+            # кириллицу в \uXXXX, а XPath таких escape-последовательностей не
+            # понимает и отклоняет селектор как некорректный. Из-за этого
+            # «Написать» не находилось никогда.
+            value = (
+                "//*[contains(normalize-space(text()), "
+                + json.dumps(value, ensure_ascii=False)
+                + ")]"
+            )
             by = "xpath"
         return self.driver.find_elements(mapping[by], value)
 
@@ -262,14 +279,70 @@ class ChatClient:
         self._focus()
         field = self.wait_for(self.selectors.message_input)
         field.click()
-        field.clear()
-        field.send_keys(text)
+        # ВАЖНО: текст ставим значением через JS, а НЕ send_keys.
+        #
+        # send_keys трактует "\n" как Enter, а Enter в чате Ozon отправляет
+        # сообщение. Из-за этого многострочный текст уходил несколькими
+        # отдельными сообщениями: «строка 1», «строка 2» и так далее. На живом
+        # продавце это подтвердилось — ушло два сообщения вместо одного.
+        #
+        # Значение, выставленное нативным сеттером с событием input, Ozon
+        # принимает (проверено), и сообщение уходит ровно одно, целиком.
+        self._set_field_value(field, text)
         time.sleep(0.5)
         button = self.wait_for(self.selectors.send_button)
         try:
             button.click()
         except Exception:
             self.driver.execute_script("arguments[0].click();", button)
+
+    def _set_field_value(self, field, text: str) -> None:
+        """Ставит текст в поле ввода одним значением, без нажатий клавиш."""
+        try:
+            self.driver.execute_script(
+                """
+                const el = arguments[0];
+                const proto = el.tagName === 'TEXTAREA'
+                  ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                setter.call(el, arguments[1]);
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                """,
+                field, text,
+            )
+        except Exception:                                    # noqa: BLE001
+            # Запасной путь: построчный ввод с Shift+Enter, чтобы переводы строк
+            # не превращались в отправку
+            from selenium.webdriver.common.keys import Keys
+            field.clear()
+            lines = text.split("\n")
+            for index, line in enumerate(lines):
+                field.send_keys(line)
+                if index < len(lines) - 1:
+                    field.send_keys(Keys.SHIFT + Keys.ENTER)
+
+    def _clear_field(self, field) -> None:
+        """Очищает поле ввода так, чтобы это увидел фронтенд Ozon."""
+        try:
+            self.driver.execute_script(
+                """
+                const el = arguments[0];
+                const proto = el.tagName === 'TEXTAREA'
+                  ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                setter.call(el, '');
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                """,
+                field,
+            )
+        except Exception:                                    # noqa: BLE001
+            # Запасной путь: обычный clear(), если JS недоступен
+            try:
+                field.clear()
+            except Exception:                                # noqa: BLE001
+                pass
 
     def field_is_empty(self) -> bool:
         """Опустело ли поле. Косвенный признак того, что сообщение ушло."""

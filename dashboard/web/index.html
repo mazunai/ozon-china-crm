@@ -2,7 +2,8 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
 <title>Ozon CRM — китайские продавцы</title>
 <style>
   :root{
@@ -39,7 +40,7 @@
   .muted{color:var(--dim);font-size:12px}
   .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
   .row + .row{margin-top:10px}
-  input[type=text],input[type=number],select{
+  input[type=text],input[type=number],select,textarea{
     background:var(--card2);border:1px solid var(--line);color:var(--text);
     border-radius:8px;padding:8px 10px;font:inherit;font-size:13px}
   input[type=text]:focus,input[type=number]:focus,select:focus{outline:none;border-color:var(--accent)}
@@ -108,6 +109,65 @@
   .log .WARNING{color:var(--warn)}
   .log .INFO{color:#9db3d4}
   .log-empty{color:var(--dim)}
+  button:focus-visible,a:focus-visible,.tab:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{
+    outline:2px solid var(--accent);outline-offset:2px}
+  html{-webkit-text-size-adjust:100%}
+
+  /* ---------- мобильная версия (≤ 767px) ---------- */
+  .cards{display:none}
+  @media (max-width:767px){
+    body{font-size:15px}
+    .top{padding:10px 12px;gap:10px}
+    .brand{font-size:16px}
+    .summary{order:3;width:100%;margin-left:0;justify-content:flex-start;gap:6px 14px;font-size:12px}
+    nav{padding:0 8px;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;
+      scrollbar-width:none}
+    nav::-webkit-scrollbar{display:none}
+    .tab{flex:0 0 auto;min-height:46px;padding:10px 14px;white-space:nowrap;border-radius:8px 8px 0 0}
+    main{padding:12px 12px 70px}
+    .card{padding:14px;margin-bottom:12px}
+    .row{gap:10px}
+    .row .spacer{display:none}
+    .row > .muted{flex:1 1 100%}
+    .row > button{flex:1 1 46%;min-height:44px;padding:10px 12px;font-size:14px}
+    .row > input[type=text]{min-width:0;width:100%;padding:11px 12px}
+    .row > select{flex:1 1 44%;min-width:0;padding:11px 8px}
+    input[type=text],input[type=number],select,textarea{font-size:16px}
+    select.sel-status,input.note-input{font-size:16px}
+    label.check{flex:1 1 calc(50% - 5px);min-width:148px;font-size:14px}
+    label.check input[type=number]{width:76px}
+    #hUrl{min-width:0;width:100%}
+    input[type=text].note-input{min-width:0}
+    .table-scroll{display:none}
+    .cards{display:block}
+    .card-seller{background:var(--card);border:1px solid var(--line);border-radius:10px;
+      padding:12px;margin-bottom:10px}
+    .card-seller.selected{background:rgba(47,124,246,.09);border-color:var(--accent)}
+    .cs-top{display:flex;align-items:flex-start;gap:10px}
+    .cs-top .rowChk{width:20px;height:20px;margin:3px 0 0;flex:0 0 auto;accent-color:var(--accent)}
+    .cs-title{flex:1;min-width:0;word-break:break-word}
+    .cs-title b{font-size:15px}
+    .cs-title .muted{display:block;margin-top:2px}
+    .cs-link{font-size:15px;padding:2px 6px;flex:0 0 auto}
+    .cs-meta{margin-top:8px;font-size:13px;color:var(--dim);line-height:1.55}
+    .cs-meta b{color:var(--text)}
+    .cs-actions{display:grid;grid-template-columns:1fr 1.4fr;gap:8px;margin-top:10px}
+    .cs-actions select,.cs-actions input{min-width:0;width:100%;min-height:42px;
+      padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--card2)}
+    .pager{flex-wrap:wrap;gap:8px}
+    .pager button{flex:1 1 40%;min-height:44px}
+    .pager select{flex:1 1 100%;min-height:44px}
+    #bulkRow{gap:8px}
+    #bulkRow .muted{flex:1 1 100%}
+    .drawer{width:100%;max-width:100%;padding:16px;padding-bottom:calc(24px + env(safe-area-inset-bottom))}
+    .drawer dl{grid-template-columns:112px 1fr}
+    .reasons{font-size:13px}
+    .toasts{left:12px;right:12px;bottom:calc(14px + env(safe-area-inset-bottom));max-width:none}
+    .toast{font-size:14px;padding:12px 14px}
+    .bar{height:8px}
+    .log{height:46vh;font-size:13px}
+    .empty{padding:32px 14px}
+  }
 </style>
 </head>
 <body>
@@ -179,8 +239,9 @@
         </thead>
         <tbody id="tbodySellers"></tbody>
       </table>
-      <div class="empty" id="emptySellers" style="display:none"></div>
     </div>
+    <div class="cards" id="cardsSellers"></div>
+    <div class="empty" id="emptySellers" style="display:none"></div>
 
     <div class="pager">
       <button class="ghost" id="btnPrev">← Назад</button>
@@ -222,8 +283,9 @@
         </thead>
         <tbody id="tbodyRejected"></tbody>
       </table>
-      <div class="empty" id="emptyRejected" style="display:none"></div>
     </div>
+    <div class="cards" id="cardsRejected"></div>
+    <div class="empty" id="emptyRejected" style="display:none"></div>
     <div class="pager">
       <button class="ghost" id="rPrev">← Назад</button>
       <span id="rPageInfo">—</span>
@@ -253,7 +315,7 @@
       </div>
       <div class="row" style="margin-top:10px">
         <textarea id="tplBody" rows="9" spellcheck="false"
-          style="width:100%;font-family:ui-monospace,Menlo,monospace;font-size:13px;
+          style="width:100%;font-family:ui-monospace,Menlo,monospace;
                  background:var(--card2);border:1px solid var(--line);color:var(--text);
                  border-radius:8px;padding:12px;resize:vertical"></textarea>
       </div>
@@ -550,17 +612,77 @@
       '<td><a href="' + esc(profile) + '" target="_blank" rel="noopener">профиль ↗</a></td>';
   }
 
+  function rejectedCardHtml(r){
+    var level = r.verified_by === "heuristic" ? "эвристика" : "не подтверждён";
+    var profile = r.seller_profile_url || ("https://www.ozon.ru/seller/" + r.seller_id + "/");
+    var checked = selected.has(r.seller_id) ? " checked" : "";
+    return '<div class="card-seller" data-seller="' + esc(r.seller_id) + '">' +
+      '<div class="cs-top">' +
+        '<input type="checkbox" class="rowChk" data-seller="' + esc(r.seller_id) + '"' + checked +
+          ' aria-label="выбрать запись">' +
+        '<div class="cs-title">' +
+          '<div><b>' + esc(r.shop_name || r.seller_id) + '</b> <span class="badge-verify unverified">' +
+            esc(level) + "</span></div>" +
+          '<span class="muted">' + esc(r.company_name || "—") + "</span>" +
+        "</div>" +
+        '<a class="cs-link" href="' + esc(profile) + '" target="_blank" rel="noopener" ' +
+          'aria-label="профиль на Ozon">↗</a>' +
+      "</div>" +
+      '<div class="cs-meta">' + esc(r.chinese_reasons || "—") + "</div>" +
+    "</div>";
+  }
+
+  function sellerCardHtml(r){
+    var badge = "";
+    if (r.verified_by === "uscc") { badge = '<span class="badge-verify">USCC</span>'; }
+    else if (r.verified_by === "warehouse") { badge = '<span class="badge-verify warehouse">склад</span>'; }
+    var multi = (r.same_company > 1)
+      ? '<span class="badge-multi" title="У компании ещё витрины">+' + (r.same_company - 1) + "</span>" : "";
+    var note = Object.prototype.hasOwnProperty.call(drafts, r.seller_id)
+      ? drafts[r.seller_id] : (r.notes || "");
+    var profile = r.seller_profile_url || ("https://www.ozon.ru/seller/" + r.seller_id + "/");
+    var checked = selected.has(r.seller_id) ? " checked" : "";
+    var meta = ["оценка <b>" + (r.score || 0).toFixed(1) + "</b>"];
+    if (r.province) { meta.push(esc(r.province)); }
+    meta.push("заказы " + fmtNum(r.orders));
+    meta.push("отзывы " + fmtNum(r.reviews));
+    if (r.months_on_ozon) { meta.push((r.months_on_ozon || 0) + " мес"); }
+    meta.push("рейтинг " + (r.rating || 0).toFixed(1));
+    return '<div class="card-seller" data-seller="' + esc(r.seller_id) + '">' +
+      '<div class="cs-top">' +
+        '<input type="checkbox" class="rowChk" data-seller="' + esc(r.seller_id) + '"' + checked +
+          ' aria-label="выбрать продавца">' +
+        '<div class="cs-title">' +
+          '<div><b>' + esc(r.shop_name || r.seller_id) + "</b>" + badge + multi + "</div>" +
+          '<span class="muted">' + esc(r.company_name || "—") + "</span>" +
+        "</div>" +
+        '<a class="cs-link" href="' + esc(profile) + '" target="_blank" rel="noopener" ' +
+          'aria-label="профиль на Ozon">↗</a>' +
+      "</div>" +
+      '<div class="cs-meta">' + meta.join(" · ") + "</div>" +
+      '<div class="cs-actions">' +
+        '<select class="sel-status" data-seller="' + esc(r.seller_id) + '">' +
+          statusOptions(r.status) + "</select>" +
+        '<input class="note-input" data-seller="' + esc(r.seller_id) + '" value="' +
+          esc(note) + '" placeholder="заметка…">' +
+      "</div>" +
+    "</div>";
+  }
+
   function renderTable(name){
     var t = T[name];
     var body = name === "sellers" ? $("tbodySellers") : $("tbodyRejected");
+    var cards = name === "sellers" ? $("cardsSellers") : $("cardsRejected");
     var empty = name === "sellers" ? $("emptySellers") : $("emptyRejected");
-    var html = "";
+    var html = "", cardsHtml = "";
 
     t.rows.forEach(function(r){
       html += '<tr data-seller="' + esc(r.seller_id) + '">' +
         (name === "sellers" ? sellerRowHtml(r) : rejectedRowHtml(r)) + "</tr>";
+      cardsHtml += name === "sellers" ? sellerCardHtml(r) : rejectedCardHtml(r);
     });
     body.innerHTML = html;
+    cards.innerHTML = cardsHtml;
 
     if (!t.rows.length) {
       empty.style.display = "block";
@@ -688,7 +810,7 @@
     var chk = closestTo(ev.target, "input.rowChk");
     if (chk) {
       if (chk.checked) { selected.add(chk.dataset.seller); } else { selected.delete(chk.dataset.seller); }
-      var row = chk.closest("tr");
+      var row = chk.closest("tr, .card-seller");
       if (row) { row.classList.toggle("selected", chk.checked); }
       updateBulkBar();
       return;
@@ -813,8 +935,13 @@
   }
   $("overlay").addEventListener("click", closeDrawer);
 
-  // Клик по строке открывает карточку, но не мешает полям внутри
+  // Клик по строке или карточке открывает карточку, но не мешает полям внутри
   document.addEventListener("click", function(ev){
+    var card = closestTo(ev.target, ".card-seller");
+    if (card && !closestTo(ev.target, "input,select,a,button")) {
+      openDrawer(card.dataset.seller);
+      return;
+    }
     var row = closestTo(ev.target, "tbody tr");
     if (!row) { return; }
     if (closestTo(ev.target, "input,select,a,button")) { return; }

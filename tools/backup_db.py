@@ -116,8 +116,16 @@ def rotate(keep: int = KEEP_BACKUPS) -> int:
     return removed
 
 
-def export_csv(db_path: Path = DB_PATH) -> Path:
-    """Выгружает продавцов в CSV — читаемая копия для git."""
+def export_csv(db_path: Path = DB_PATH, verified_only: bool = True) -> Path:
+    """Выгружает продавцов в CSV — читаемая копия для git.
+
+    По умолчанию только ПОДТВЕРЖДЁННЫЕ (USCC или склад в Китае). Неподтверждённые
+    в выгрузку не идут: это список для работы, и российской компании в нём быть
+    не должно. Раньше фильтра не было, и в CSV попадали все подряд — включая
+    продавцов, которых перепроверка понизила.
+
+    Полный список со всеми уровнями — `--all`.
+    """
     if not db_path.exists():
         raise FileNotFoundError(f"База не найдена: {db_path}")
 
@@ -127,8 +135,9 @@ def export_csv(db_path: Path = DB_PATH) -> Path:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
+        where = "WHERE verified_by IN ('uscc', 'warehouse')" if verified_only else ""
         rows = conn.execute(
-            f"SELECT {', '.join(EXPORT_COLUMNS)} FROM sellers ORDER BY score DESC"
+            f"SELECT {', '.join(EXPORT_COLUMNS)} FROM sellers {where} ORDER BY score DESC"
         ).fetchall()
     finally:
         conn.close()
@@ -204,6 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="дополнительно выгрузить в CSV и отправить в git")
     parser.add_argument("--no-snapshot", action="store_true",
                         help="не делать снимок (только выгрузка)")
+    parser.add_argument("--all", action="store_true",
+                        help="в выгрузку включить и неподтверждённых (по умолчанию только подтверждённые)")
     return parser
 
 
@@ -238,7 +249,7 @@ def main() -> int:
             rotate(args.keep)
 
         if args.push:
-            export = export_csv()
+            export = export_csv(verified_only=not args.all)
             print(f"Выгрузка: {export}")
             push_to_git()
     except FileNotFoundError as exc:

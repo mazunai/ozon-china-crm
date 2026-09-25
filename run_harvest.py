@@ -240,7 +240,30 @@ def cmd_reverify(args) -> int:
         print("Нет продавцов, подтверждённых по складу — перепроверять нечего.")
         return 0
 
-    print(f"Перепроверяю {len(rows)} продавцов по виджету доставки…")
+    # Сначала — проверка юрлица, без сети. Российская регистрация (ООО/ИП,
+    # ОГРН/ОГРНИП) перебивает склад: такая компания может везти из Китая, но
+    # китайским продавцом не является. Это то, из-за чего в подтверждённые
+    # попадали ООО "АРАВИЯ" и подобные.
+    by_legal = [r for r in rows if r["registration_kind"] in ("ogrn", "ogrnip", "inn_ru")]
+    rest = [r for r in rows if r["registration_kind"] not in ("ogrn", "ogrnip", "inn_ru")]
+
+    for r in by_legal:
+        store.set_verification_reason(
+            r["seller_id"], "none",
+            f"российское юрлицо ({r['registration_kind']}) — китайским продавцом "
+            "не считается, даже если товар едет из Китая",
+        )
+    if by_legal:
+        print(f"Понижено без сети по юрлицу: {len(by_legal)}")
+        for r in by_legal:
+            print(f"  {(r['shop_name'] or '—')[:30]:<31} {r['company_name'][:30]}")
+
+    rows = rest
+    if not rows:
+        print("\nОстальные проверки не требуются.")
+        return 0
+
+    print(f"\nПерепроверяю {len(rows)} продавцов по виджету доставки…")
     manager, driver = None, None
     confirmed = downgraded = failed = 0
     try:
@@ -296,6 +319,42 @@ def cmd_reverify(args) -> int:
     return 0
 
 
+def cmd_purge(args) -> int:
+    """Удаляет из базы записи, не подтверждённые как китайские.
+
+    Нужна, если хочется, чтобы в базе не было вообще ничего лишнего: записи
+    уровня «не подтверждён» и «эвристика» — это кандидаты, которые проверку не
+    прошли, и среди них встречаются российские юрлица. В дашборде они и так
+    скрыты, но физически лежат в файле и попадают в выгрузку «--all».
+
+    Требует явного подтверждения: удаление необратимо.
+    """
+    store = open_store()
+    rows = [r for r in store.iter_sellers()
+            if r["verified_by"] not in ("uscc", "warehouse")]
+
+    if not rows:
+        print("Нечего удалять: все записи подтверждены.")
+        return 0
+
+    print(f"К удалению: {len(rows)} записей, не подтверждённых как китайские:\n")
+    for r in rows[:20]:
+        legal = (r["company_name"] or "—")[:34]
+        print(f"  [{r['verified_by']:<9}] {(r['shop_name'] or '—')[:30]:<31} юрлицо: {legal}")
+    if len(rows) > 20:
+        print(f"  … и ещё {len(rows) - 20}")
+
+    if not args.yes:
+        print("\nЭто необратимая операция. Повтори с флагом --yes.")
+        print("Перед удалением советую снять копию: python tools/backup_db.py")
+        return 1
+
+    deleted = store.delete_sellers([r["seller_id"] for r in rows])
+    print(f"\nУдалено: {deleted}")
+    print(store.stats().as_text())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Сбор китайских продавцов Ozon в базу",
@@ -329,6 +388,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="перепроверить подтверждённых по складу и записать причину")
     p.add_argument("--delay", type=float, default=DEFAULT_DELAY)
     p.set_defaults(func=cmd_reverify)
+
+    p = sub.add_parser("purge",
+                       help="удалить записи, не подтверждённые как китайские")
+    p.add_argument("--yes", action="store_true", help="подтвердить удаление")
+    p.set_defaults(func=cmd_purge)
 
     p = sub.add_parser("stats", help="состояние базы")
     p.add_argument("--by-verification", action="store_true", help="разбивка по достоверности")

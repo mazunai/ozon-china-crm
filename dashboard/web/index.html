@@ -127,6 +127,7 @@
   .badge-verify{display:inline-block;font-size:11px;padding:1px 6px;border-radius:10px;
     background:rgba(47,124,246,.15);color:#8ab4f8;margin-left:6px}
   .badge-verify.warehouse{background:rgba(154,120,255,.15);color:#b39ddb}
+  .badge-verify.unverified{background:rgba(248,113,113,.18);color:#f87171;font-weight:600}
   .chip{padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--muted);font-size:12.5px;cursor:pointer;font-weight:500}
   .chip.active{background:var(--accent-soft);border-color:rgba(59,118,255,.45);color:var(--accent-2)}
   .chip.active.china{background:var(--china-soft);border-color:rgba(255,77,109,.45);color:#ff8fa5}
@@ -665,11 +666,20 @@
       var reg = row.uscc
         ? '<span class="uscc">' + esc(row.uscc) + '</span>'
         : esc(row.registration_kind === "ogrnip" ? "ОГРНИП (РФ)" : (row.registration_kind || "—"));
-      var verify = row.verified_by === "uscc" ? "USCC"
-        : (row.verified_by === "warehouse" ? "склад" : "");
-      var badge = verify
-        ? '<span class="badge-verify ' + (row.verified_by === "warehouse" ? "warehouse" : "") + '">' + verify + '</span>'
-        : "";
+      // Неподтверждённых помечаем явно и красным: без пометки их легко принять
+      // за подтверждённых, а среди них бывают российские юрлица (например
+      // ООО КАРИ, которое перепроверка понизила). Такие в список для работы
+      // попадать не должны.
+      var verify, badge;
+      if (row.verified_by === "uscc") {
+        verify = "USCC"; badge = '<span class="badge-verify">' + verify + '</span>';
+      } else if (row.verified_by === "warehouse") {
+        verify = "склад"; badge = '<span class="badge-verify warehouse">' + verify + '</span>';
+      } else if (row.verified_by === "heuristic") {
+        badge = '<span class="badge-verify unverified">НЕ ПОДТВЕРЖДЁН (эвристика)</span>';
+      } else {
+        badge = '<span class="badge-verify unverified">НЕ ПОДТВЕРЖДЁН</span>';
+      }
 
       var options = Object.keys(sellersState.labels).map(function(key){
         return '<option value="' + key + '"' + (key === row.status ? " selected" : "") + ">"

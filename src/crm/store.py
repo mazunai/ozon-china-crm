@@ -349,6 +349,24 @@ class SellerStore:
             )
             return cur.rowcount > 0
 
+    def delete_sellers(self, seller_ids: Sequence[str]) -> int:
+        """Удаляет записи по идентификаторам. Возвращает число удалённых.
+
+        Нужно для чистки неподтверждённых: они скрыты в интерфейсе, но лежат в
+        файле базы и попадают в выгрузку «--all».
+        """
+        if not seller_ids:
+            return 0
+        with self._connect() as conn:
+            placeholders = ",".join("?" * len(seller_ids))
+            cur = conn.execute(
+                f"DELETE FROM sellers WHERE seller_id IN ({placeholders})",
+                list(seller_ids),
+            )
+            deleted = cur.rowcount
+        logger.info(f"Удалено записей: {deleted}")
+        return deleted
+
     def set_verification_reason(self, seller_id: str, verified_by: str, reason: str) -> bool:
         """Обновляет уровень достоверности и причину вердикта.
 

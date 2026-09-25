@@ -655,9 +655,19 @@ class ChinaSellerHarvester:
 
         # Уровень достоверности. USCC — абсолютный; иначе смотрим склад;
         # иначе остаются эвристики, которые в дашборд не идут.
+        # Российская регистрация перебивает склад. Это принципиальный момент:
+        # ООО или ИП из РФ может отгружать товар из Китая, но китайским
+        # продавцом от этого не становится. Раньше склад проверялся без учёта
+        # юрлица, и в подтверждённые попадали российские компании
+        # (ООО "АРАВИЯ", ООО "СПЛ-ТЕХНИК РУС" и подобные).
+        ru_registration = parsed.get("registration_kind") in ("ogrn", "ogrnip", "inn_ru")
+        is_ru_entity = bool(classification.is_russian or ru_registration)
+
         if uscc or classification.uscc:
             verified = VERIFY_USCC
             province = province or classification.province
+        elif is_ru_entity:
+            verified = VERIFY_NONE
         elif warehouse.get("is_china"):
             verified = VERIFY_WAREHOUSE
         elif classification.is_chinese:
@@ -674,6 +684,11 @@ class ChinaSellerHarvester:
         if warehouse.get("reason"):
             prefix = "склад" if verified == VERIFY_WAREHOUSE else "склад не подтвердил Китай"
             reasons.append(f"{prefix}: {warehouse['reason']}")
+        if is_ru_entity and not uscc:
+            reasons.append(
+                "российское юрлицо — китайским продавцом не считается, "
+                "даже если товар едет из Китая"
+            )
 
         metrics = SellerMetrics.from_raw(
             seller_id=seller_id,

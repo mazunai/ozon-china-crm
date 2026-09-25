@@ -558,6 +558,13 @@ def run_queue(
         if missing:
             raise RuntimeError(f"Не заполнены селекторы: {', '.join(missing)}")
         client = ChatClient(driver, selectors, manager=manager)
+
+        # Сначала открываем Ozon. Драйвер создаёт НОВУЮ пустую вкладку
+        # (about:blank), и проверка входа на ней всегда давала «сессии нет»,
+        # даже когда сессия на месте — из-за этого отправка не запускалась.
+        client._focus()
+        driver.get("https://www.ozon.ru/")
+        time.sleep(3)
         if not client.is_logged_in():
             raise RuntimeError(
                 "В браузере нет залогиненной сессии Ozon. "

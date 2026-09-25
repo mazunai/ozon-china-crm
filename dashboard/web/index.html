@@ -244,6 +244,32 @@
     </div>
 
     <div class="card">
+      <h2>Текст сообщения</h2>
+      <div class="row">
+        <span class="muted">
+          Пишите прямо здесь. Переменные подставятся для каждого продавца,
+          строку отказа от рассылки оставьте — без неё отправка не запустится.
+        </span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <textarea id="tplBody" rows="9" spellcheck="false"
+          style="width:100%;font-family:ui-monospace,Menlo,monospace;font-size:13px;
+                 background:var(--card2);border:1px solid var(--line);color:var(--text);
+                 border-radius:8px;padding:12px;resize:vertical"></textarea>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="btnSaveTemplate">Сохранить текст</button>
+        <button class="ghost" id="btnPreviewMessage">Показать на продавце</button>
+        <span class="spacer"></span>
+        <span class="muted" id="tplStatus">—</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="muted" id="tplVars"></span>
+      </div>
+      <div id="tplPreview" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card">
       <h2>Ограничители</h2>
       <div class="row">
         <label class="check">интервал, мин <input type="number" id="sInterval" min="1" max="1440"></label>
@@ -1049,6 +1075,7 @@
       $("sCap").value = s.daily_cap;
       $("sWindowStart").value = s.window_start;
       $("sWindowEnd").value = s.window_end;
+      loadTemplate();
       var stopInfo = (d.preflight.checks || []).filter(function(c){ return c.key === "stop"; })[0];
       $("stopFileInfo").textContent = stopInfo ? stopInfo.detail : "—";
       return d.preflight;
@@ -1061,6 +1088,60 @@
   }
 
   $("btnSendRefresh").addEventListener("click", loadSend);
+
+  // ---- текст сообщения ----
+  function loadTemplate(){
+    fetch("/api/send/template").then(function(r){ return r.json(); }).then(function(d){
+      if (d.error) { throw new Error(d.error); }
+      var box = $("tplBody");
+      // Не затираем то, что человек уже печатает
+      if (!box.dataset.touched || !box.value.trim()) {
+        box.value = d.body || "";
+        box.dataset.touched = d.source === "file" ? "1" : "0";
+      }
+      $("tplVars").textContent = "Переменные: " + (d.variables || [])
+        .map(function(v){ return "{" + v + "}"; }).join("  ");
+
+      var parts = [];
+      if (d.source === "example") { parts.push("показан образец — напишите свой текст"); }
+      if (d.is_placeholder) { parts.push("осталась метка-заготовка"); }
+      if (d.body && !d.has_optout) { parts.push("нет строки отказа от рассылки"); }
+      $("tplStatus").innerHTML = parts.length
+        ? '<span style="color:var(--warn)">' + esc(parts.join("; ")) + "</span>"
+        : '<span style="color:var(--ok)">текст готов</span>';
+    }).catch(function(err){
+      $("tplStatus").innerHTML = '<span style="color:var(--err)">' + esc(err.message) + "</span>";
+    });
+  }
+
+  $("tplBody").addEventListener("input", function(){
+    this.dataset.touched = "1";
+  });
+
+  $("btnSaveTemplate").addEventListener("click", function(){
+    postJson("/api/send/template", {body: $("tplBody").value})
+      .then(function(res){
+        toast("Текст сохранён", "ok");
+        if (res.warning) { toast(res.warning, "err"); }
+        loadTemplate();
+        loadSend();
+      })
+      .catch(function(err){ toast("Не сохранено: " + err.message, "err"); });
+  });
+
+  $("btnPreviewMessage").addEventListener("click", function(){
+    fetch("/api/send/preview-message").then(function(r){ return r.json(); }).then(function(d){
+      if (d.error) { throw new Error(d.error); }
+      $("tplPreview").innerHTML =
+        '<div class="muted">Так увидит продавец <b>' + esc(d.shop_name) + "</b> (" +
+        fmtNum(d.orders) + " заказов):</div>" +
+        '<div class="reasons" style="margin-top:6px;color:var(--text)">' + esc(d.text) + "</div>";
+    }).catch(function(err){
+      $("tplPreview").innerHTML = '<div class="muted" style="color:var(--err)">' +
+        esc(err.message) + "</div>";
+    });
+  });
+
   $("btnCheckLogin").addEventListener("click", function(){
     // Открывает браузер с профилем парсера и проверяет, узнаёт ли Ozon сессию.
     // Без браузера вход проверить нельзя, поэтому это отдельная кнопка.

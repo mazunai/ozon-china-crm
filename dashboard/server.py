@@ -482,6 +482,87 @@ class SendRunner:
         except TemplateError as exc:
             return None, str(exc).split("\n")[0]
 
+    # --- шаблон сообщения -------------------------------------------------- #
+    MAIN_TEMPLATE = "main.txt"
+
+    def template_path(self) -> Path:
+        return self.TEMPLATES_DIR / self.MAIN_TEMPLATE
+
+    def read_template(self) -> dict:
+        """Текущий текст сообщения. Если файла нет — отдаём заготовку-образец."""
+        path = self.template_path()
+        example = self.TEMPLATES_DIR / "example.txt.example"
+        body, source = "", "empty"
+        if path.exists():
+            body, source = path.read_text(encoding="utf-8"), "file"
+        elif example.exists():
+            body, source = example.read_text(encoding="utf-8"), "example"
+
+        from src.outreach.templates import ALLOWED_FIELDS, _plural  # noqa: F401
+        from src.outreach.templates import PLACEHOLDER_MARKER, OPTOUT_MARKERS
+
+        lowered = body.lower()
+        return {
+            "name": path.stem,
+            "body": body,
+            "source": source,
+            "path": str(path.name),
+            "variables": sorted(ALLOWED_FIELDS),
+            "is_placeholder": PLACEHOLDER_MARKER in body,
+            "has_optout": any(marker in lowered for marker in OPTOUT_MARKERS),
+        }
+
+    def save_template(self, body: str) -> dict:
+        """Проверяет и сохраняет текст сообщения.
+
+        Проверяем до записи: без строки отказа от рассылки шаблон отклоняется,
+        и лучше узнать об этом здесь, чем при запуске отправки.
+        """
+        from src.outreach.templates import MessageTemplate, TemplateError
+
+        self.TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+        candidate = MessageTemplate(name=self.MAIN_TEMPLATE[:-4], body=body or "")
+        try:
+            candidate.validate()
+        except TemplateError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        self.template_path().write_text(body, encoding="utf-8")
+        result = self.read_template()
+        result["ok"] = True
+        result["warning"] = (
+            "В тексте осталась метка-заготовка — реальная отправка будет заблокирована"
+            if candidate.is_placeholder() else ""
+        )
+        return result
+
+    def preview_message(self, seller_id: Optional[str] = None) -> dict:
+        """Показывает готовый текст на данных реального продавца."""
+        from src.outreach.templates import TemplateError
+
+        template, error = self.template()
+        if template is None:
+            return {"error": error or "шаблон не загружен"}
+
+        store = CRUD.store()
+        if seller_id:
+            row = store.get_seller(seller_id)
+        else:
+            rows = store.list_sellers(statuses=["new"], limit=1)
+            row = rows[0] if rows else None
+        if row is None:
+            return {"error": "В очереди нет продавцов для примера"}
+
+        try:
+            return {
+                "seller_id": row["seller_id"],
+                "shop_name": row["shop_name"] or row["seller_id"],
+                "orders": row["orders"],
+                "text": template.render(dict(row)),
+            }
+        except TemplateError as exc:
+            return {"error": str(exc)}
+
     # --- проверка готовности ---------------------------------------------- #
     def preflight(self) -> dict:
         from src.outreach.sender import preflight
@@ -1133,6 +1214,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
         if path == "/api/sellers":
             return self._send_json(CRUD.sellers(self._query()))
+        if path == "/api/send/template":
+            return self._send_json(SEND.read_template())
+        if path == "/api/send/preview-message":
+            return self._send_json(SEND.preview_message(self._query().get("seller_id")))
         if path == "/api/summary":
             return self._send_json(CRUD.summary())
         if path == "/api/seller/detail":
@@ -1337,6 +1422,11 @@ class Handler(BaseHTTPRequestHandler):
             from src.outreach.sender import check_login_live
             live = check_login_live(SEND.DATA_DIR, on_progress=HUB.log)
             return self._send_json(live)
+
+        if path == "/api/send/template":
+            result = SEND.save_template(str(data.get("body", "")))
+            code = 200 if result.get("ok") else 400
+            return self._send_json(result, code)
 
         if path == "/api/send/settings":
             try:

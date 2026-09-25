@@ -168,6 +168,14 @@ class SellerStore:
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         try:
+            # WAL: дашборд читает базу, пока харвестер пишет. В обычном режиме
+            # журнала это давало бы «database is locked» на чтении. Плюс WAL
+            # переживает аварийное завершение процесса без порчи файла.
+            conn.execute("PRAGMA journal_mode=WAL")
+            # synchronous=NORMAL — безопасный компромисс для WAL: данные не
+            # теряются при падении процесса, только при потере питания машины.
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             yield conn
             conn.commit()
         except Exception:

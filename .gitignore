@@ -143,6 +143,11 @@ outreach_data/selectors.proposed.json
 outreach_data/inspect_dump.html
 outreach_data/STOP
 
-# База CRM и локальные секреты
+# это читаемая офсайт-копия в приватном репозитории.
+data/ # база и снимки целиком (кроме выгрузки ниже)
+
+# База CRM и снимки — локальные, в git не нужны.
+# Выгрузка backups/sellers.csv намеренно НЕ игнорируется:
+# это читаемая офсайт-копия в приватном репозитории.
 data/
 .env

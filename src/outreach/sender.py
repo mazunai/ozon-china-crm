@@ -184,6 +184,24 @@ def kill_switch_active(stop_file: Path) -> bool:
     return stop_file.exists()
 
 
+# Когда вкладку отправщика закрывают (вместе с окном Chrome или отдельно),
+# chromedriver отвечает такими ошибками. Это не вина продавца: после
+# переподключения к браузеру его можно отправить без списания попытки.
+_BROWSER_LOST_MARKERS = (
+    "no such window",
+    "target window already closed",
+    "web view not found",
+    "invalid session id",
+    "chrome not reachable",
+)
+
+
+def _browser_lost(exc: Exception) -> bool:
+    """Потерялось ли окно/сессия браузера, а не контент страницы."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _BROWSER_LOST_MARKERS)
+
+
 # --- Работа с браузером ---------------------------------------------------
 
 
@@ -624,6 +642,8 @@ def run_queue(
 
     driver = None
     manager = None
+    selectors = None
+    client = None
     if not config.dry_run:
         manager, driver = build_driver(headless=False)
         selectors = ChatSelectors.load(data_dir / "selectors.json")
@@ -643,8 +663,32 @@ def run_queue(
                 "В браузере нет залогиненной сессии Ozon. "
                 "Войдите в аккаунт в открывшемся окне и запустите снова."
             )
-    else:
-        client = None
+
+    def rebuild_browser() -> None:
+        """Пересоздаёт подключение, если вкладку отправщика закрыли.
+
+        Прогон идёт с паузами по 10 минут, и Chrome на этой машине общий:
+        вкладку отправщика можно закрыть случайно или вместе с окном. Раньше
+        каждая следующая попытка падала с «no such window: target window
+        already closed», и очередь сгорала по одному продавцу за круг.
+        Теперь переподключаемся и пробуем того же продавца ещё раз.
+        """
+        nonlocal manager, driver, client
+        if manager is not None:
+            try:
+                manager.close()
+            except Exception:                           # noqa: BLE001
+                pass
+        manager, driver = build_driver(headless=False)
+        client = ChatClient(driver, selectors, manager=manager)
+        client._focus()
+        driver.get("https://www.ozon.ru/")
+        time.sleep(3)
+        if not client.is_logged_in():
+            raise RuntimeError(
+                "После переподключения сессия Ozon не найдена — "
+                "войдите в открывшемся окне и запустите снова"
+            )
 
     try:
         while True:
@@ -707,26 +751,45 @@ def run_queue(
             message = template.render(dict(row))
             emit("sending", seller_id=seller_id, shop=shop)
 
-            try:
-                client.open_chat(row["seller_id"])
-                client.send(message)
-                if client.confirm_sent():
-                    queue.mark_sent(seller_id, message)
-                    report["sent"] += 1
-                    emit("sent", seller_id=seller_id, shop=shop, total=report["sent"])
-                else:
+            # Попытки браузера для одного продавца: основная + одна после
+            # переподключения, если вкладку закрыли. Это отдельно от attempts
+            # в базе: потеря окна — не вина продавца, списывать его попытку
+            # из-за неё нельзя.
+            browser_attempts = 0
+            while browser_attempts < 2:
+                browser_attempts += 1
+                try:
+                    client.open_chat(row["seller_id"])
+                    client.send(message)
+                    if client.confirm_sent():
+                        queue.mark_sent(seller_id, message)
+                        report["sent"] += 1
+                        emit("sent", seller_id=seller_id, shop=shop, total=report["sent"])
+                        break
                     queue.mark_failed(seller_id, "не подтвердилась отправка", retryable=True)
                     if hasattr(queue, "log_message"):
                         queue.log_message(seller_id, message, "failed", "не подтвердилась отправка")
                     report["failed"] += 1
                     emit("failed", seller_id=seller_id, shop=shop, error="не подтвердилась отправка")
-            except Exception as exc:                       # noqa: BLE001
-                retryable = int(row["attempts"] or 0) < config.max_attempts
-                queue.mark_failed(seller_id, str(exc), retryable=retryable)
-                if hasattr(queue, "log_message"):
-                    queue.log_message(seller_id, message, "failed", str(exc))
-                report["failed"] += 1
-                emit("failed", seller_id=seller_id, shop=shop, error=str(exc)[:200])
+                    break
+                except Exception as exc:                   # noqa: BLE001
+                    if _browser_lost(exc) and browser_attempts < 2:
+                        progress(
+                            f"Вкладка отправщика закрылась ({str(exc)[:100]}) — "
+                            "переподключаюсь и повторяю"
+                        )
+                        try:
+                            rebuild_browser()
+                            continue
+                        except Exception as reb_exc:       # noqa: BLE001
+                            exc = reb_exc
+                    retryable = int(row["attempts"] or 0) < config.max_attempts
+                    queue.mark_failed(seller_id, str(exc), retryable=retryable)
+                    if hasattr(queue, "log_message"):
+                        queue.log_message(seller_id, message, "failed", str(exc))
+                    report["failed"] += 1
+                    emit("failed", seller_id=seller_id, shop=shop, error=str(exc)[:200])
+                    break
 
             next_allowed_at = now_fn() + timedelta(seconds=plan_next_delay(config))
 

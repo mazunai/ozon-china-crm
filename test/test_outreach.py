@@ -26,6 +26,7 @@ from src.outreach.scoring import (
 )
 from src.outreach.sender import (
     SenderConfig,
+    _browser_lost,
     in_window,
     parse_window,
     plan_next_delay,
@@ -204,6 +205,23 @@ def test_plan_next_delay_in_range():
 
     # Нулевой интервал не должен давать нулевую паузу
     assert plan_next_delay(SenderConfig(interval_minutes=0, interval_jitter_minutes=0)) >= 60
+
+
+def test_browser_lost_detection():
+    """Распознаём потерю окна/сессии браузера — это повод переподключиться,
+    а не списывать продавца."""
+    # Реальные сообщения chromedriver с вечера 25.09: окно закрыли, когда
+    # прогон был в паузе, и три продавца подряд падали с этими ошибками
+    assert _browser_lost(Exception("no such window: target window already closed"))
+    assert _browser_lost(Exception("no such window: Target window already closed"))
+    assert _browser_lost(Exception("web view not found"))
+    assert _browser_lost(Exception("invalid session id"))
+    assert _browser_lost(Exception("chrome not reachable"))
+
+    # Это НЕ потеря браузера: элемент устарел или страница не дождалась
+    assert not _browser_lost(Exception("stale element reference"))
+    assert not _browser_lost(Exception("timeout"))
+    assert not _browser_lost(Exception("не найдена кнопка «Написать»"))
 
 
 def main():

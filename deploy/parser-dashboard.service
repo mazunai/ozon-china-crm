@@ -1,0 +1,16 @@
+[Unit]
+Description=Ozon CRM dashboard
+After=network.target xvfb.service
+Requires=xvfb.service
+
+[Service]
+User=yc-user
+Group=yc-user
+WorkingDirectory=/home/yc-user/parser
+Environment=DISPLAY=:99
+ExecStart=/home/yc-user/parser/.venv/bin/python /home/yc-user/parser/dashboard/server.py --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

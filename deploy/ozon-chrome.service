@@ -1,0 +1,15 @@
+[Unit]
+Description=Chrome с профилем Ozon (порт отладки 9222)
+After=network.target xvfb.service
+Requires=xvfb.service
+
+[Service]
+User=yc-user
+Group=yc-user
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/google-chrome --remote-debugging-port=9222 --user-data-dir=/home/yc-user/.ozon_parser_chrome --no-first-run --no-default-browser-check --window-size=1920,1080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

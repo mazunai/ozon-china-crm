@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.config.settings import Settings
 from src.crm.harvest import DEFAULT_DELAY, ChinaSellerHarvester, OzonPageClient
+from src.crm.verify import build_widget_request, find_delivery_node, verify_by_warehouse
 from src.crm.store import (
     STATUS_LABELS,
     VERIFY_LABELS,
@@ -223,6 +224,78 @@ def cmd_export(args) -> int:
     return 0
 
 
+def cmd_reverify(args) -> int:
+    """Перепроверяет продавцов, подтверждённых по складу, и записывает причину.
+
+    Нужна потому, что склад — вторичный признак: он слабее USCC. Команда
+    заново читает виджет доставки и либо записывает регион склада как
+    обоснование, либо понижает продавца до «не подтверждён», если Китай не
+    подтвердился.
+    """
+    import json as _json
+
+    store = open_store()
+    rows = [r for r in store.iter_sellers() if r["verified_by"] == "warehouse"]
+    if not rows:
+        print("Нет продавцов, подтверждённых по складу — перепроверять нечего.")
+        return 0
+
+    print(f"Перепроверяю {len(rows)} продавцов по виджету доставки…")
+    manager, driver = None, None
+    confirmed = downgraded = failed = 0
+    try:
+        manager, driver = _driver()
+        client = OzonPageClient(driver, delay=args.delay)
+        client.ensure_ready()
+
+        for index, row in enumerate(rows, 1):
+            url = row["sample_product_url"]
+            if not url:
+                failed += 1
+                continue
+            article = url.rstrip("/").split("/")[-1]
+            card = client.page(f"/product/{article}/")
+            if not card:
+                failed += 1
+                continue
+
+            request = build_widget_request(
+                find_delivery_node(card.get("layout")), f"/product/{article}/"
+            )
+            if not request:
+                failed += 1
+                continue
+            response = client.fetch_json(request["url"], method="POST", body=request["body"])
+            info = verify_by_warehouse(_json.dumps(response or {}, ensure_ascii=False))
+
+            if info.is_china:
+                confirmed += 1
+                store.set_verification_reason(
+                    row["seller_id"], "warehouse", f"склад: {info.reason}"
+                )
+                mark = "OK  "
+            else:
+                downgraded += 1
+                store.set_verification_reason(
+                    row["seller_id"], "none",
+                    f"склад не подтвердил Китай: {info.reason or 'регион не найден'}",
+                )
+                mark = "ПОНИЖЕН"
+            print(f"  [{index}/{len(rows)}] {mark} {(row['shop_name'] or row['seller_id'])[:30]:<31} {info.reason}")
+
+    finally:
+        if manager is not None:
+            try:
+                manager.close()
+            except Exception:
+                pass
+
+    print(f"\nПодтверждено: {confirmed}, понижено: {downgraded}, не удалось проверить: {failed}")
+    if confirmed:
+        print("Обнови страницу дашборда — причины склада теперь видны в карточке.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Сбор китайских продавцов Ozon в базу",
@@ -251,6 +324,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("show", help="подробности по продавцу")
     p.add_argument("seller_id")
     p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("reverify",
+                       help="перепроверить подтверждённых по складу и записать причину")
+    p.add_argument("--delay", type=float, default=DEFAULT_DELAY)
+    p.set_defaults(func=cmd_reverify)
 
     p = sub.add_parser("stats", help="состояние базы")
     p.add_argument("--by-verification", action="store_true", help="разбивка по достоверности")

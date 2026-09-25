@@ -159,6 +159,139 @@ class SellersApi:
 CRUD = SellersApi(DB_PATH)
 AUTH = load_credentials()
 
+# Раздел Ozon Global, откуда берутся китайские продавцы. Подставляется в форму
+# как значение по умолчанию — это и есть «та самая ссылка».
+CHINA_SECTION_URL = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/"
+
+
+class HarvestRunner:
+    """Запуск сбора китайских продавцов прямо из дашборда.
+
+    Отдельно от `Service`: тот управляет старым парсером категорий (обход
+    страницы со скроллом), а здесь — обход раздела Ozon Global по страницам с
+    подтверждением страны по USCC. Это разные вещи, и смешивать их не нужно.
+
+    Работает в фоновом потоке, прогресс отдаёт через общую шину событий, чтобы
+    интерфейс рисовал его теми же компонентами, что и лог парсера.
+    """
+
+    def __init__(self):
+        self.state = {
+            "running": False,
+            "url": "",
+            "pages": 0,
+            "phase": "",
+            "progress": 0,
+            "error": "",
+            "stats": {},
+            "started_at": None,
+            "finished_at": None,
+        }
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+
+    def status(self) -> dict:
+        return dict(self.state)
+
+    def start(self, url: str, pages: int) -> None:
+        with self._lock:
+            if self.state["running"]:
+                raise ValueError("Сбор уже идёт")
+
+            url = (url or "").strip() or CHINA_SECTION_URL
+            if "ozon.ru" not in url:
+                raise ValueError("Укажите ссылку на раздел Ozon")
+            pages = max(1, min(int(pages or 10), 200))
+
+            self._stop.clear()
+            self.state.update({
+                "running": True, "url": url, "pages": pages,
+                "phase": "Запускаю браузер", "progress": 0,
+                "error": "", "stats": {},
+                "started_at": time.time(), "finished_at": None,
+            })
+
+        self._thread = threading.Thread(target=self._run, args=(url, pages), daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        HUB.publish({"type": "log", "line": "Запрошена остановка сбора…"})
+
+    def _run(self, url: str, pages: int) -> None:
+        def log(message: str) -> None:
+            HUB.publish({"type": "log", "line": message})
+
+        def progress(done: int, total: int, phase: str) -> None:
+            # Три фазы разной длины: сбор товаров, определение продавцов,
+            # проверка реквизитов. В одну шкалу их сводим с весами.
+            weights = {"Собираю товары": (0, 40), "Определяю продавцов": (40, 35),
+                       "Проверяю реквизиты": (75, 25)}
+            start, span = weights.get(phase, (0, 0))
+            value = start + (span * done / total if total else 0)
+            self.state["phase"] = phase
+            self.state["progress"] = round(min(value, 100), 1)
+            HUB.publish({"type": "harvest", **self.state})
+
+        try:
+            from src.crm.harvest import ChinaSellerHarvester, OzonPageClient
+            from src.crm.store import SellerStore
+            from src.utils.browser import create_browser_manager
+
+            log(f"Раздел: {url}")
+            log(f"Страниц: {pages} (по 8 товаров)")
+
+            manager = create_browser_manager(headless=True)
+            driver = manager.create_driver()
+            try:
+                client = OzonPageClient(driver, delay=0.7)
+                client.ensure_ready()
+                harvester = ChinaSellerHarvester(
+                    client=client,
+                    store=SellerStore(DB_PATH),
+                    on_progress=log,
+                    progress_cb=progress,
+                )
+                stats = harvester.run(url, pages=pages)
+            finally:
+                try:
+                    manager.close()
+                except Exception:                            # noqa: BLE001
+                    pass
+
+            self.state.update({
+                "running": False, "phase": "Готово", "progress": 100,
+                "stats": {
+                    "pages": stats.pages, "products": stats.products,
+                    "sellers": stats.sellers_found,
+                    "uscc": stats.sellers_verified_uscc,
+                    "warehouse": stats.sellers_verified_warehouse,
+                    "rejected": stats.sellers_rejected,
+                    "requests": stats.requests,
+                },
+                "finished_at": time.time(),
+            })
+            log(
+                f"Сбор завершён: страниц {stats.pages}, товаров {stats.products}, "
+                f"продавцов {stats.sellers_found} "
+                f"(по USCC {stats.sellers_verified_uscc}, по складу {stats.sellers_verified_warehouse})"
+            )
+            HUB.publish({"type": "harvest", **self.state})
+            HUB.publish({"type": "harvest_done", "stats": self.state["stats"]})
+        except Exception as exc:                             # noqa: BLE001
+            logging.getLogger(__name__).exception("Сбор не удался")
+            self.state.update({
+                "running": False, "phase": "Ошибка", "error": str(exc)[:400],
+                "finished_at": time.time(),
+            })
+            log(f"Ошибка сбора: {exc}")
+            HUB.publish({"type": "harvest", **self.state})
+            HUB.publish({"type": "harvest_done", "stats": {}, "error": str(exc)[:400]})
+
+
+HARVEST = HarvestRunner()
+
 
 # --------------------------------------------------------------------------- #
 #  Шина событий: лог и статус уходят подписчикам SSE
@@ -654,8 +787,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(CRUD.sellers(self._query()))
         if path == "/api/sellers/meta":
             return self._send_json(CRUD.sellers_meta())
+        if path == "/api/harvest":
+            return self._send_json({
+                **HARVEST.status(),
+                "default_url": CHINA_SECTION_URL,
+            })
         if path == "/api/status":
-            return self._send_json(SERVICE.status())
+            return self._send_json({**SERVICE.status(), "harvest": HARVEST.status()})
         if path == "/api/results":
             return self._send_json(SERVICE.results())
         if path == "/api/health":
@@ -722,6 +860,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(CRUD.set_status(seller_id, status))
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
+
+        if path == "/api/harvest":
+            try:
+                HARVEST.start(
+                    str(data.get("url", "")).strip(),
+                    int(data.get("pages") or 10),
+                )
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+            except Exception as exc:                      # noqa: BLE001
+                return self._send_json({"error": f"Ошибка запуска: {exc}"}, 500)
+            return self._send_json({"ok": True})
+
+        if path == "/api/harvest/stop":
+            HARVEST.stop()
+            return self._send_json({"ok": True})
 
         if path == "/api/start":
             try:

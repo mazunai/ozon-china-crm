@@ -349,6 +349,24 @@ class SellerStore:
             )
             return cur.rowcount > 0
 
+    def set_verification_reason(self, seller_id: str, verified_by: str, reason: str) -> bool:
+        """Обновляет уровень достоверности и причину вердикта.
+
+        Нужно при перепроверке: вторичные признаки (склад) слабее USCC, и по
+        итогам повторной проверки продавца можно как подтвердить с обоснованием,
+        так и понизить до «не подтверждён».
+        """
+        if verified_by not in VERIFY_LABELS:
+            raise ValueError(f"Неизвестный уровень: {verified_by}")
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE sellers SET verified_by = ?, chinese_reasons = ?, "
+                "is_chinese = ?, updated_at = ? WHERE seller_id = ?",
+                (verified_by, reason, int(verified_by in (VERIFY_USCC, VERIFY_WAREHOUSE)),
+                 _now(), seller_id),
+            )
+            return cur.rowcount > 0
+
     def set_status(self, seller_id: str, status: str) -> bool:
         """Ручная смена статуса. Статус used рассылки меняется осознанно."""
         if status not in STATUS_LABELS:

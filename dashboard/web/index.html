@@ -282,6 +282,34 @@
       </div>
     </section>
 
+    <!-- Сбор китайских продавцов: обход раздела Ozon Global по страницам,
+         страна подтверждается по USCC из реквизитов. Это НЕ то же самое, что
+         «Запустить парсинг» выше: там обход категории со скроллом. -->
+    <section class="card" style="grid-column:1/-1">
+      <div class="card-head">
+        <h2>Собрать китайских продавцов</h2>
+        <span class="muted" id="harvestPhase">—</span>
+      </div>
+      <div class="toolbar" style="flex-wrap:wrap;gap:8px">
+        <div class="search" style="flex:1;min-width:320px">
+          <input type="text" id="harvestUrl" placeholder="ссылка на раздел Ozon Global">
+        </div>
+        <label class="check">страниц
+          <input type="number" id="harvestPages" value="10" min="1" max="200" style="width:64px">
+        </label>
+        <button class="primary" id="btnHarvest">Собрать</button>
+        <button class="ghost" id="btnHarvestStop" disabled>Остановить</button>
+      </div>
+      <div class="progress-card on" style="margin-top:10px">
+        <div class="bar"><div class="fill" id="harvestBar" style="width:0%"></div></div>
+        <div class="progress-meta"><span id="harvestMeta">Ожидание</span></div>
+      </div>
+      <div class="muted" style="margin-top:8px;font-size:12px">
+        Страниц по 8 товаров. Сбор идёт в фоне, прогресс — в логе слева.
+        По завершении таблица продавцов обновится сама.
+      </div>
+    </section>
+
     <!-- Продавцы: читается из базы, а не из памяти, поэтому переживает
          перезапуск сервера и не пропадает при запуске нового парса. -->
     <section class="card" style="grid-column:1/-1">
@@ -477,6 +505,19 @@
 
       if (ev.type === "log"){
         addLog(ev.level, ev.line, ev.ts);
+      } else if (ev.type === "harvest"){
+        applyHarvest(ev);
+        if (ev.running) setProgress(ev.phase, ev.progress);
+      } else if (ev.type === "harvest_done"){
+        applyHarvest({running:false, progress:100, phase:"Готово", stats:ev.stats || {}, error:ev.error || ""});
+        setProgress("Готово", 100);
+        if (ev.error) {
+          toast("Сбор не удался: " + ev.error, "err");
+        } else {
+          toast("Собрано продавцов: " + (ev.stats && ev.stats.sellers || 0)
+                + ", подтверждено по USCC: " + (ev.stats && ev.stats.uscc || 0), "ok");
+        }
+        loadSellers();
       } else if (ev.type === "progress"){
         if (state.running) setProgress(ev.phase, ev.value);
       } else if (ev.type === "status"){
@@ -714,6 +755,60 @@
       return r.json();
     });
   }
+
+  // ---- Сбор китайских продавцов ----
+  function applyHarvest(h){
+    if (!h) return;
+    var running = !!h.running;
+    $("btnHarvest").disabled = running;
+    $("btnHarvestStop").disabled = !running;
+    $("btnHarvest").textContent = running ? "Собираю…" : "Собрать";
+    $("harvestBar").style.width = (h.progress || 0) + "%";
+
+    var meta = "";
+    if (running) {
+      meta = (h.phase || "работаю") + " — " + (h.progress || 0).toFixed(0) + "%";
+      if (h.pages) { meta += ", страниц " + h.pages; }
+    } else if (h.error) {
+      meta = "Ошибка: " + h.error;
+    } else if (h.stats && h.stats.sellers !== undefined) {
+      meta = "Готово: товаров " + h.stats.products + ", продавцов " + h.stats.sellers
+           + " (подтверждено по USCC: " + h.stats.uscc + ")";
+    } else {
+      meta = "Ожидание";
+    }
+    $("harvestPhase").textContent = h.phase || "—";
+    $("harvestMeta").textContent = meta;
+  }
+
+  function startHarvest(){
+    var url = $("harvestUrl").value.trim();
+    var pages = parseInt($("harvestPages").value, 10) || 10;
+    if (!url) { toast("Укажите ссылку на раздел", "err"); return; }
+    $("btnHarvest").disabled = true;
+    postJson("/api/harvest", { url: url, pages: pages })
+      .then(function(){
+        toast("Сбор запущен — прогресс в логе", "ok");
+        $("progressCard").classList.add("on");
+        setProgress("Сбор продавцов", 0);
+      })
+      .catch(function(err){
+        $("btnHarvest").disabled = false;
+        toast("Не удалось запустить: " + err.message, "err");
+      });
+  }
+
+  $("btnHarvest").addEventListener("click", startHarvest);
+  $("btnHarvestStop").addEventListener("click", function(){
+    postJson("/api/harvest/stop", {})
+      .then(function(){ toast("Останавливаю…"); })
+      .catch(function(){ toast("Не удалось остановить", "err"); });
+  });
+
+  fetch("/api/harvest").then(function(r){ return r.json(); }).then(function(h){
+    if (h.default_url && !$("harvestUrl").value) { $("harvestUrl").value = h.default_url; }
+    applyHarvest(h);
+  }).catch(function(){});
 
   fetch("/api/status").then(function(r){ return r.json(); }).then(applyStatus).catch(function(){});
   fetch("/api/results").then(function(r){ return r.json(); }).then(function(res){

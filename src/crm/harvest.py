@@ -510,13 +510,26 @@ class ChinaSellerHarvester:
         client: OzonPageClient,
         store: Optional[SellerStore] = None,
         on_progress: Optional[Callable[[str], None]] = None,
+        progress_cb: Optional[Callable[[int, int, str], None]] = None,
     ):
         self.client = client
         self.store = store
         self.on_progress = on_progress
+        # Структурный прогресс для интерфейса: (сделано, всего, фаза).
+        # Отдельно от текстового лога, чтобы дашборд рисовал полосу, а не
+        # вылавливал числа регулярками из сообщений.
+        self.progress_cb = progress_cb
         self.stats = HarvestStats()
         self._seen_products: Set[str] = set()
         self._sellers: Dict[str, dict] = {}
+
+    def _report(self, done: int, total: int, phase: str) -> None:
+        if not self.progress_cb:
+            return
+        try:
+            self.progress_cb(done, total, phase)
+        except Exception as exc:                             # noqa: BLE001
+            logger.debug(f"progress_cb упал: {exc}")
 
     def _log(self, message: str) -> None:
         logger.info(message)
@@ -571,6 +584,7 @@ class ChinaSellerHarvester:
                     new += 1
 
             self._log(f"Страница {page_number}: товаров на странице {len(items)}, новых {new}")
+            self._report(page_number, pages, "Собираю товары")
             if new == 0:
                 self._log("Новых товаров нет — дальше страниц нет")
                 break
@@ -600,6 +614,7 @@ class ChinaSellerHarvester:
             if "warehouse" not in record:
                 record["warehouse"] = self._check_warehouse(data, article)
 
+            self._report(index, len(product_ids), "Определяю продавцов")
             if index % 10 == 0:
                 self._log(f"Обработано товаров: {index}/{len(product_ids)}, продавцов {len(sellers)}")
         return sellers
@@ -652,6 +667,14 @@ class ChinaSellerHarvester:
 
         is_chinese = verified in (VERIFY_USCC, VERIFY_WAREHOUSE)
 
+        # Причины пишем целиком: по ним видно, ЧЕМ подтверждён вердикт. Для
+        # склада это особенно важно — иначе «подтверждён по складу» повисает
+        # без объяснения, по какому именно региону.
+        reasons = list(classification.reasons)
+        if warehouse.get("reason"):
+            prefix = "склад" if verified == VERIFY_WAREHOUSE else "склад не подтвердил Китай"
+            reasons.append(f"{prefix}: {warehouse['reason']}")
+
         metrics = SellerMetrics.from_raw(
             seller_id=seller_id,
             orders_count=parsed.get("orders_count", ""),
@@ -669,7 +692,7 @@ class ChinaSellerHarvester:
                 f"https://www.ozon.ru/product/{record['products'][0]}/" if record.get("products") else ""
             ),
             verified_by=verified,
-            chinese_reasons="; ".join(classification.reasons),
+            chinese_reasons="; ".join(reasons),
         )
 
         if verified == VERIFY_USCC:
@@ -695,19 +718,38 @@ class ChinaSellerHarvester:
         self.stats.sellers_found = len(sellers)
         self._log(f"Найдено продавцов: {len(sellers)}. Проверяю реквизиты…")
 
-        metrics: List[SellerMetrics] = []
+        # Пишем в базу порциями по ходу проверки, а не только в конце.
+        # Прогон на 50 страниц идёт минут пятнадцать, и падение в середине
+        # не должно обнулять уже проделанную работу. Заодно прогресс видно в
+        # дашборде сразу, не дожидаясь финала.
+        BATCH = 25
+        buffer: List[SellerMetrics] = []
+        added_total = 0
+
+        def flush(force: bool = False) -> None:
+            nonlocal buffer, added_total
+            if self.store is None or (not force and len(buffer) < BATCH):
+                return
+            if not buffer:
+                return
+            score_all(buffer)
+            added_total += self.store.add_sellers(buffer)
+            buffer = []
+
         for index, (seller_id, record) in enumerate(sellers.items(), 1):
             result = self.enrich_seller(seller_id, record)
             if result:
-                metrics.append(result)
+                buffer.append(result)
+            flush()
+            self._report(index, len(sellers), "Проверяю реквизиты")
             if index % 5 == 0:
                 self._log(f"Проверено продавцов: {index}/{len(sellers)}")
 
-        score_all(metrics)
+        flush(force=True)
 
         if self.store is not None:
-            added = self.store.add_sellers(metrics)
-            self._log(f"В базу: добавлено {added}, обновлено {len(metrics) - added}")
+            total = added_total
+            self._log(f"В базу: добавлено {total}, обновлено {len(sellers) - total}")
 
         self.stats.requests = self.client.requests
         self._log(f"Готово. {self.stats.as_text()}")

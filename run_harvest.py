@@ -73,9 +73,15 @@ def cmd_harvest(args) -> int:
         # Открываем Ozon один раз: дальше запросы идут fetch'ем из страницы,
         # это на порядок быстрее навигации на каждый URL.
         driver.get("https://www.ozon.ru/")
-        client = OzonPageClient(driver, delay=args.delay)
+        # Адаптивная пауза по умолчанию; явный --delay означает фиксированный
+        # темп (пользователь сам выбрал значение).
+        adaptive = args.delay == DEFAULT_DELAY
+        client = OzonPageClient(driver, delay=args.delay, adaptive=adaptive)
 
-        harvester = ChinaSellerHarvester(client=client, store=store, on_progress=print)
+        harvester = ChinaSellerHarvester(
+            client=client, store=store, on_progress=print,
+            refresh_days=args.refresh_days,
+        )
         stats = harvester.run(args.url or DEFAULT_SECTION, pages=args.pages)
 
         print(f"\nИтог: {stats.as_text()}")
@@ -367,7 +373,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("harvest", help="собрать продавцов из раздела")
     p.add_argument("--url", default=DEFAULT_SECTION, help="ссылка на раздел Ozon Global")
     p.add_argument("--pages", type=int, default=10, help="сколько страниц обойти (8 товаров на страницу)")
-    p.add_argument("--delay", type=float, default=DEFAULT_DELAY, help="пауза между запросами, сек")
+    p.add_argument("--delay", type=float, default=DEFAULT_DELAY,
+                   help="пауза между запросами, сек; при явной --delay адаптация отключается")
+    p.add_argument("--refresh-days", type=int, default=7, metavar="N",
+                   help="перечитывать модалки известных продавцов раз в N дней; "
+                        "0 — никогда, только новые (по умолчанию 7)")
     p.set_defaults(func=cmd_harvest)
 
     p = sub.add_parser("list", help="показать продавцов из базы")

@@ -82,6 +82,10 @@ CRM_COLUMNS = {
     # от любой правки (заметка, смена статуса), и дневной лимит считался по
     # нему — отметка «ответил» съедала лимит и сокращала отправки.
     "sent_at": "TEXT NOT NULL DEFAULT ''",
+    # Когда в последний раз обновлялись метрики (модалка продавца). Отдельно
+    # от updated_at: инкрементальный сбор пропускает известных продавцов и
+    # возвращается к их модалкам только раз в N дней (флаг --refresh-days).
+    "metrics_at": "TEXT NOT NULL DEFAULT ''",
 }
 
 # Журнал отправок. В sellers.message_sent хранится только последнее сообщение
@@ -129,8 +133,25 @@ CREATE TABLE IF NOT EXISTS sellers (
     first_seen_at       TEXT NOT NULL DEFAULT '',
     last_seen_at        TEXT NOT NULL DEFAULT '',
     product_count       INTEGER NOT NULL DEFAULT 0,
-    chinese_reasons     TEXT NOT NULL DEFAULT ''
+    chinese_reasons     TEXT NOT NULL DEFAULT '',
+    metrics_at          TEXT NOT NULL DEFAULT ''
 );
+"""
+
+# Кэш «товар → продавец». Определение продавца по карточке товара — самый
+# дорогой запрос во всём сборе (по одному на товар), а связка «товар этого
+# раздела продаёт этот продавец» меняется редко. Повторный проход берёт
+# продавца из кэша и не открывает карточку заново (протухание 14 дней:
+# товар, исчезнувший из раздела, перестаёт считаться свежим).
+PRODUCTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS seller_products (
+    article        TEXT PRIMARY KEY,
+    seller_id      TEXT NOT NULL,
+    first_seen_at  TEXT NOT NULL,
+    last_seen_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_seller_products_seen ON seller_products(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_seller_products_seller ON seller_products(seller_id);
 """
 
 # Индексы создаются ПОСЛЕ миграции: на старой базе очереди колонки verified_by
@@ -178,7 +199,7 @@ SELECT_FIELDS = (
     "orders, reviews, months_on_ozon, rating, score, is_chinese, verified_by, "
     "seller_profile_url, sample_product_url, status, notes, attempts, last_attempt_at, "
     "last_error, message_sent, first_seen_at, last_seen_at, product_count, chinese_reasons, "
-    "sent_at"
+    "sent_at, metrics_at"
 )
 
 
@@ -220,6 +241,7 @@ class SellerStore:
             conn.executescript(SCHEMA_INDEXES)
             conn.executescript(SCHEMA_INDEXES_AFTER_MIGRATION)
             conn.executescript(MESSAGES_SCHEMA)
+            conn.executescript(PRODUCTS_SCHEMA)
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -233,6 +255,14 @@ class SellerStore:
             if column not in existing:
                 conn.execute(f"ALTER TABLE sellers ADD COLUMN {column} {definition}")
                 logger.info(f"Миграция: добавлена колонка sellers.{column}")
+                # metrics_at появляется один раз в истории базы здесь же и
+                # бэкфиллится: этим же прогоном метрики уже собирались, и без
+                # отметки первый же инкрементальный сбор перечитывал модалки
+                # всех известных продавцов.
+                if column == "metrics_at":
+                    conn.execute(
+                        "UPDATE sellers SET metrics_at = updated_at WHERE metrics_at = ''"
+                    )
 
     # --- Наполнение -------------------------------------------------------
 
@@ -264,7 +294,7 @@ class SellerStore:
                                seller_profile_url = CASE WHEN seller_profile_url = '' THEN ? ELSE seller_profile_url END,
                                sample_product_url = CASE WHEN sample_product_url = '' THEN ? ELSE sample_product_url END,
                                chinese_reasons = CASE WHEN ? != '' THEN ? ELSE chinese_reasons END,
-                               last_seen_at = ?, updated_at = ?
+                               last_seen_at = ?, updated_at = ?, metrics_at = ?
                            WHERE seller_id = ?""",
                         (
                             s.shop_name, s.company_name, s.uscc, s.province,
@@ -275,7 +305,7 @@ class SellerStore:
                             s.sample_product_url,
                             getattr(s, "chinese_reasons", "") or "",
                             getattr(s, "chinese_reasons", "") or "",
-                            now, now, s.seller_id,
+                            now, now, now, s.seller_id,
                         ),
                     )
                 else:
@@ -285,8 +315,9 @@ class SellerStore:
                                orders, reviews, months_on_ozon, rating, score,
                                is_chinese, verified_by, registration_kind,
                                seller_profile_url, sample_product_url, chinese_reasons,
-                               status, first_seen_at, last_seen_at, created_at, updated_at
-                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               status, first_seen_at, last_seen_at, created_at, updated_at,
+                               metrics_at
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             s.seller_id, s.shop_name, s.company_name, s.uscc, s.province,
                             s.orders, s.reviews, s.months_on_ozon, s.rating, s.score,
@@ -295,7 +326,7 @@ class SellerStore:
                             getattr(s, "seller_profile_url", "") or "",
                             s.sample_product_url,
                             getattr(s, "chinese_reasons", "") or "",
-                            STATUS_NEW, now, now, now, now,
+                            STATUS_NEW, now, now, now, now, now,
                         ),
                     )
                     added += 1
@@ -465,6 +496,94 @@ class SellerStore:
             return conn.execute(
                 f"SELECT {SELECT_FIELDS} FROM sellers WHERE seller_id = ?", (seller_id,)
             ).fetchone()
+
+    # --- Инкрементальный сбор ----------------------------------------------
+
+    def sellers_meta(self) -> Dict[str, dict]:
+        """Сводка по всем известным продавцам для повторных проходов раздела.
+
+        Позволяет харвестеру не открывать модалку продавца, который уже
+        проверен и чьи метрики ещё свежие (см. metrics_at).
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT seller_id, shop_name, verified_by, metrics_at "
+                "FROM sellers"
+            ).fetchall()
+        return {r["seller_id"]: dict(r) for r in rows}
+
+    def product_owners(self, articles: Sequence[str], max_age_days: int = 14) -> Dict[str, str]:
+        """Кэш «товар → продавец»: какие из товаров уже встречались разделам.
+
+        Возвращает только связки не старше max_age_days (товар, надолго
+        пропавший из разделов, может сменить продавца) и только для продавцов,
+        которые ещё есть в базе.
+        """
+        if not articles:
+            return {}
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat(
+            timespec="seconds"
+        )
+        placeholders = ",".join("?" * len(articles))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT p.article, p.seller_id FROM seller_products p "
+                f"JOIN sellers s ON s.seller_id = p.seller_id "
+                f"WHERE p.article IN ({placeholders}) AND p.last_seen_at >= ?",
+                [*articles, cutoff],
+            ).fetchall()
+        return {r["article"]: r["seller_id"] for r in rows}
+
+    def touch_products(self, pairs: Sequence[Tuple[str, str]]) -> int:
+        """Освежает кэш товаров: новые связки вставляет, старые продлевает.
+
+        Возвращает число новых записей (первых встреч товара).
+        """
+        if not pairs:
+            return 0
+        now = _now()
+        fresh = 0
+        with self._connect() as conn:
+            for article, seller_id in pairs:
+                cur = conn.execute(
+                    "UPDATE seller_products SET seller_id = ?, last_seen_at = ? "
+                    "WHERE article = ?",
+                    (seller_id, now, article),
+                )
+                if cur.rowcount == 0:
+                    conn.execute(
+                        "INSERT INTO seller_products "
+                        "(article, seller_id, first_seen_at, last_seen_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (article, seller_id, now, now),
+                    )
+                    fresh += 1
+        return fresh
+
+    def mark_seen(self, items: Sequence[Tuple[str, str]]) -> int:
+        """Отмечает продавца встреченным в разделе, не трогая метрики.
+
+        Используется для известных продавцов, чьи модалки в этом прогоне не
+        перечитывались: last_seen_at и ссылка на товар обновляются, а статус,
+        реквизиты и метрики остаются как были.
+        Пара — (seller_id, product_url).
+        """
+        if not items:
+            return 0
+        now = _now()
+        seen = 0
+        with self._connect() as conn:
+            for seller_id, product_url in items:
+                cur = conn.execute(
+                    "UPDATE sellers SET "
+                    "last_seen_at = ?, updated_at = ?, "
+                    "sample_product_url = CASE WHEN sample_product_url = '' THEN ? "
+                    "ELSE sample_product_url END "
+                    "WHERE seller_id = ?",
+                    (now, now, product_url, seller_id),
+                )
+                seen += cur.rowcount
+        return seen
 
     # --- Правки из дашборда ----------------------------------------------
 

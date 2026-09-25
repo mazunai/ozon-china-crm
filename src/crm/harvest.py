@@ -27,6 +27,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .store import (
@@ -54,10 +55,14 @@ SELLER_MODAL = "/modal/shop-in-shop-info?seller_id={seller_id}"
 # рекомендации («Возможно, вам понравится») с товарами не из раздела.
 MAIN_GRID_PARAMS = "{}"
 
-# Пауза между запросами. Ozon начинает притормаживать сессию на частых
-# запросах (проверено: на ~150 запросах подряд запросы начали виснуть),
-# поэтому темп сдерживаем осознанно.
-DEFAULT_DELAY = 0.7
+# Стартовая пауза между запросами. Ozon начинает притормаживать сессию на
+# частых запросах (проверено: на ~150 запросах подряд запросы начали виснуть),
+# поэтому темп сдерживаем осознанно. Пауза адаптивная: OzonPageClient сам
+# поднимает её при медленных/битых ответах и плавно опускает к полу
+# (delay_min), пока сессия отвечает чисто.
+DEFAULT_DELAY = 0.35
+DELAY_FLOOR = 0.3            # нижняя граница адаптивной паузы
+DELAY_CEILING = 3.0          # верхняя граница при проблемах с сессией
 
 
 @dataclass
@@ -68,16 +73,25 @@ class HarvestStats:
     sellers_verified_uscc: int = 0
     sellers_verified_warehouse: int = 0
     sellers_rejected: int = 0
+    # Известные продавцы, чьи модалки в этом прогоне не перечитывались
+    # (метрики свежие) — и товары, взятые из кэша вместо карточек.
+    sellers_skipped: int = 0
+    cards_cached: int = 0
     requests: int = 0
     cancelled: bool = False
     errors: List[str] = field(default_factory=list)
 
     def as_text(self) -> str:
+        extra = ""
+        if self.sellers_skipped:
+            extra += f", свежих пропущено={self.sellers_skipped}"
+        if self.cards_cached:
+            extra += f", карточек по кэшу={self.cards_cached}"
         return (
             f"страниц={self.pages}, товаров={self.products}, "
             f"продавцов={self.sellers_found} "
             f"(по USCC={self.sellers_verified_uscc}, по складу={self.sellers_verified_warehouse}, "
-            f"отсеяно={self.sellers_rejected}), запросов={self.requests}"
+            f"отсеяно={self.sellers_rejected}){extra}, запросов={self.requests}"
         )
 
 
@@ -107,14 +121,26 @@ class OzonPageClient:
     навигацию, если fetch не сработал или страница под челленджем.
     """
 
-    def __init__(self, driver, delay: float = DEFAULT_DELAY, transport: str = "auto"):
+    def __init__(
+        self,
+        driver,
+        delay: float = DEFAULT_DELAY,
+        transport: str = "auto",
+        adaptive: bool = True,
+        min_delay: float = DELAY_FLOOR,
+        max_delay: float = DELAY_CEILING,
+    ):
         self.driver = driver
-        self.delay = delay
+        self.delay = delay                    # текущая пауза (стартовая, потом адаптируется)
+        self.adaptive = adaptive
+        self.delay_min = min_delay
+        self.delay_max = max_delay
         self.requests = 0
         self.last_error = ""
         self._origin_ready = False
         self._transport = transport          # auto | fetch | navigate
         self._fetch_failures = 0
+        self._clean_streak = 0               # сколько запросов подряд без проблем
 
     def _page_is_challenged(self) -> bool:
         """Похожа ли текущая страница на антибот-челлендж."""
@@ -239,6 +265,7 @@ class OzonPageClient:
 
         url = path if path.startswith("http") else f"https://www.ozon.ru{path}"
 
+        started = time.monotonic()
         raw = None
         if self._use_fetch():
             if self._page_is_challenged():
@@ -252,23 +279,47 @@ class OzonPageClient:
         if raw is None:
             raw = self._fetch_by_navigation(url)
 
+        data = None
         if not raw:
             self.last_error = f"пустой ответ на {path[:80]}"
-            return None
-        if isinstance(raw, str) and raw.startswith("ERR:"):
+        elif isinstance(raw, str) and raw.startswith("ERR:"):
             self.last_error = raw[:200]
             logger.debug(f"Ошибка fetch: {raw[:160]}")
-            return None
+        else:
+            try:
+                data = json.loads(raw)
+            except (TypeError, json.JSONDecodeError) as exc:
+                self.last_error = f"не JSON в ответе на {path[:60]}: {exc}"
 
-        try:
-            data = json.loads(raw)
-        except (TypeError, json.JSONDecodeError) as exc:
-            self.last_error = f"не JSON в ответе на {path[:60]}: {exc}"
-            return None
-
+        self._adapt(time.monotonic() - started, isinstance(data, dict))
         if self.delay:
             time.sleep(self.delay)
         return data if isinstance(data, dict) else None
+
+    def _adapt(self, elapsed: float, healthy: bool) -> None:
+        """Подстраивает паузу под состояние сессии.
+
+        Пока Ozon отвечает чисто и быстро — пауза плавно опускается к полу
+        (экономим минуты на больших прогонах). Битый или медленный ответ —
+        признак, что сессию притормаживают: пауза растёт с запасом, чтобы
+        не усугубить. Навигационный транспорт не наказываем за «медленно»:
+        там запрос сам по себе длится 1-3 секунды.
+        """
+        if not self.adaptive:
+            return
+        if not healthy:
+            self._clean_streak = 0
+            self.delay = min(self.delay * 2.0, self.delay_max)
+            logger.info(f"Битый ответ — пауза поднята до {self.delay:.2f}с")
+        elif self._transport != "navigate" and elapsed >= 2.0:
+            self._clean_streak = 0
+            self.delay = min(self.delay * 1.5, self.delay_max)
+            logger.info(f"Медленный ответ ({elapsed:.1f}с) — пауза до {self.delay:.2f}с")
+        else:
+            self._clean_streak += 1
+            if self._clean_streak >= 8 and self.delay > self.delay_min:
+                self.delay = max(self.delay_min, self.delay * 0.9)
+                self._clean_streak = 0
 
     def _page_text(self) -> str:
         """Текст текущей страницы.
@@ -514,6 +565,7 @@ class ChinaSellerHarvester:
         on_progress: Optional[Callable[[str], None]] = None,
         progress_cb: Optional[Callable[[int, int, str], None]] = None,
         stop_event: Optional["threading.Event"] = None,
+        refresh_days: int = 7,
     ):
         self.client = client
         self.store = store
@@ -525,9 +577,15 @@ class ChinaSellerHarvester:
         # Отдельно от текстового лога, чтобы дашборд рисовал полосу, а не
         # вылавливал числа регулярками из сообщений.
         self.progress_cb = progress_cb
+        # Как часто перечитывать модалки известных продавцов (метрики).
+        # 0 — никогда не перечитывать, только новые.
+        self.refresh_days = refresh_days
         self.stats = HarvestStats()
         self._seen_products: Set[str] = set()
         self._sellers: Dict[str, dict] = {}
+        # Известные продавцы из базы: seller_id -> мета (для пропуска свежих
+        # и имён магазинов при попадании в кэш товаров).
+        self._known: Dict[str, dict] = {}
 
     def cancelled(self) -> bool:
         """Запрошена ли отмена. Проверяется в каждом цикле обхода."""
@@ -605,13 +663,38 @@ class ChinaSellerHarvester:
         return product_ids
 
     def resolve_sellers(self, product_ids: Sequence[str]) -> Dict[str, dict]:
-        """По товарам находит продавцов: карточка -> seller_id."""
+        """По товарам находит продавцов: карточка -> seller_id.
+
+        Карточку качаем только у товаров, которых нет в кэше «товар →
+        продавец»: на повторных проходах раздела почти всё берётся из кэша,
+        и дорогой запрос карточки остаётся только новым товарам.
+        """
+        owners: Dict[str, str] = {}
+        if self.store is not None:
+            owners = self.store.product_owners(product_ids)
+
         sellers: Dict[str, dict] = {}
         for index, article in enumerate(product_ids, 1):
             if self.cancelled():
                 self.stats.cancelled = True
                 self._log(f"Отменено на товаре {index} из {len(product_ids)}")
                 break
+
+            cached = owners.get(article) if article in owners else None
+            if cached and cached in self._known:
+                self.stats.cards_cached += 1
+                record = sellers.setdefault(cached, {
+                    "shop_name": self._known[cached].get("shop_name", ""),
+                    "products": [],
+                    "delivery_node": None,
+                })
+                record["products"].append(article)
+                self._report(index, len(product_ids), "Определяю продавцов")
+                if index % 10 == 0:
+                    self._log(f"Обработано товаров: {index}/{len(product_ids)}, "
+                              f"продавцов {len(sellers)}")
+                continue
+
             data = self.client.page(f"/product/{article}/")
             if not data:
                 self.stats.errors.append(f"товар {article}: пустой ответ")
@@ -622,24 +705,28 @@ class ChinaSellerHarvester:
             if not seller_id:
                 continue
 
-            record = sellers.setdefault(seller_id, {"shop_name": shop_name, "products": []})
+            record = sellers.setdefault(seller_id, {
+                "shop_name": shop_name, "products": [], "delivery_node": None,
+            })
             if not record["shop_name"] and shop_name:
                 record["shop_name"] = shop_name
             record["products"].append(article)
 
-            # Склад проверяем по первому товару продавца — это второй уровень
-            # достоверности, не зависящий от реквизитов.
-            if "warehouse" not in record:
-                record["warehouse"] = self._check_warehouse(data, article)
+            # Узел доставки запоминаем из первого товара без запроса: сам
+            # запрос к виджету доставки делаем позже, и только если не хватит
+            # USCC или юрлица (см. enrich_seller). На 50 страницах это минус
+            # ~240 запросов к складу.
+            if record["delivery_node"] is None:
+                record["delivery_node"] = find_delivery_node(data.get("layout"))
 
             self._report(index, len(product_ids), "Определяю продавцов")
             if index % 10 == 0:
-                self._log(f"Обработано товаров: {index}/{len(product_ids)}, продавцов {len(sellers)}")
+                self._log(f"Обработано товаров: {index}/{len(product_ids)}, "
+                          f"продавцов {len(sellers)}")
         return sellers
 
-    def _check_warehouse(self, card_json: Dict, article: str) -> Optional[dict]:
+    def _check_warehouse(self, node: Optional[dict], article: str) -> Optional[dict]:
         """Проверяет склад продавца через виджет доставки."""
-        node = find_delivery_node(card_json.get("layout"))
         request = build_widget_request(node, f"/product/{article}/")
         if not request:
             return None
@@ -650,6 +737,19 @@ class ChinaSellerHarvester:
         raw = json.dumps(response, ensure_ascii=False)
         info = verify_by_warehouse(raw)
         return {"is_china": info.is_china, "region": info.region, "reason": info.reason}
+
+    def _metrics_fresh(self, known: dict, refresh_days: int) -> bool:
+        """Свежие ли метрики продавца: модалку перечитывать не нужно."""
+        if refresh_days <= 0:
+            return True
+        raw = (known.get("metrics_at") or "").strip()
+        if not raw:
+            return False
+        try:
+            fetched = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return fetched + timedelta(days=refresh_days) >= datetime.now(timezone.utc)
 
     def enrich_seller(self, seller_id: str, record: dict) -> Optional[SellerMetrics]:
         """Достаёт модалку продавца и собирает метрики с вердиктом по стране."""
@@ -662,7 +762,6 @@ class ChinaSellerHarvester:
         inn = parsed.get("inn") or ""
         uscc = parsed.get("uscc") or ""
         province = parsed.get("province") or ""
-        warehouse = record.get("warehouse") or {}
 
         classification = classify_seller(
             company_name=company,
@@ -681,6 +780,15 @@ class ChinaSellerHarvester:
         ru_registration = parsed.get("registration_kind") in ("ogrn", "ogrnip", "inn_ru")
         is_ru_entity = bool(classification.is_russian or ru_registration)
 
+        # Запрос склада — самый дорогой из вторичных признаков (POST к
+        # виджету доставки). Он нужен только тем, у кого нет ни USCC, ни
+        # российского юрлица: остальным вердикт уже известен.
+        warehouse: dict = {}
+        if not (uscc or classification.uscc) and not is_ru_entity:
+            node = record.get("delivery_node")
+            if node and record.get("products"):
+                warehouse = self._check_warehouse(node, record["products"][0]) or {}
+
         if uscc or classification.uscc:
             verified = VERIFY_USCC
             province = province or classification.province
@@ -696,12 +804,27 @@ class ChinaSellerHarvester:
         else:
             verified = VERIFY_NONE
 
+        # Подтверждённого продавца не понижаем без свежих данных: прогон мог
+        # пройти по кэшу товаров без карточки, и «не подтверждён» здесь — это
+        # отсутствие информации, а не опровержение.
+        known_level = self._known.get(seller_id, {}).get("verified_by", "")
+        guarded = False
+        if verified in (VERIFY_HEURISTIC, VERIFY_NONE) and known_level in (
+            VERIFY_USCC, VERIFY_WAREHOUSE,
+        ):
+            verified = known_level
+            guarded = True
+
         is_chinese = verified in (VERIFY_USCC, VERIFY_WAREHOUSE)
 
         # Причины пишем целиком: по ним видно, ЧЕМ подтверждён вердикт. Для
         # склада это особенно важно — иначе «подтверждён по складу» повисает
         # без объяснения, по какому именно региону.
         reasons = list(classification.reasons)
+        if guarded:
+            reasons.append(
+                "прежний уровень сохранён: свежих данных о складе/реквизитах нет"
+            )
         if warehouse.get("reason"):
             prefix = "склад" if verified == VERIFY_WAREHOUSE else "склад не подтвердил Китай"
             reasons.append(f"{prefix}: {warehouse['reason']}")
@@ -750,6 +873,11 @@ class ChinaSellerHarvester:
             self._log("Товары не найдены — проверьте ссылку раздела")
             return self.stats
 
+        # Известных продавцов загружаем до определения продавцов: кэш товаров
+        # и пропуск свежих модалок опираются на содержимое базы.
+        if self.store is not None:
+            self._known = self.store.sellers_meta()
+
         sellers = self.resolve_sellers(product_ids)
         self.stats.sellers_found = len(sellers)
         self._log(f"Найдено продавцов: {len(sellers)}. Проверяю реквизиты…")
@@ -760,6 +888,7 @@ class ChinaSellerHarvester:
         # дашборде сразу, не дожидаясь финала.
         BATCH = 25
         buffer: List[SellerMetrics] = []
+        seen: List[Tuple[str, str]] = []     # встреченные продавцы: (id, ссылка на товар)
         added_total = 0
 
         def flush(force: bool = False) -> None:
@@ -777,9 +906,23 @@ class ChinaSellerHarvester:
                 self.stats.cancelled = True
                 self._log(f"Отменено на продавце {index} из {len(sellers)}")
                 break
+
+            known = self._known.get(seller_id)
+            if known and self._metrics_fresh(known, self.refresh_days):
+                # Метрики свежие — модалку не перечитываем. Это главный выигрыш
+                # повторных прогонов: на 50 страницах без него 270+ запросов
+                # уходили бы на уже известные карточки.
+                self.stats.sellers_skipped += 1
+                if record.get("products"):
+                    seen.append((seller_id, f"https://www.ozon.ru/product/{record['products'][0]}/"))
+                self._report(index, len(sellers), "Проверяю реквизиты")
+                continue
+
             result = self.enrich_seller(seller_id, record)
             if result:
                 buffer.append(result)
+            if record.get("products"):
+                seen.append((seller_id, f"https://www.ozon.ru/product/{record['products'][0]}/"))
             flush()
             self._report(index, len(sellers), "Проверяю реквизиты")
             if index % 5 == 0:
@@ -787,9 +930,28 @@ class ChinaSellerHarvester:
 
         flush(force=True)
 
+        if self.store is not None and not self.cancelled():
+            if seen:
+                self.store.mark_seen(seen)
+            # Кэш «товар → продавец» освежаем одним пакетом: и новые связки,
+            # и старые (продлеваем last_seen_at).
+            pairs = [
+                (article, seller_id)
+                for seller_id, record in sellers.items()
+                for article in record.get("products", [])
+            ]
+            if pairs:
+                fresh = self.store.touch_products(pairs)
+                self._log(f"Кэш товаров: {len(pairs)} связок (новых {fresh})")
+
         if self.store is not None:
-            total = added_total
-            self._log(f"В базу: добавлено {total}, обновлено {len(sellers) - total}")
+            parts = [f"добавлено {added_total}"]
+            refreshed = len(sellers) - added_total - self.stats.sellers_skipped
+            if refreshed > 0:
+                parts.append(f"обновлено {refreshed}")
+            if self.stats.sellers_skipped:
+                parts.append(f"свежих пропущено {self.stats.sellers_skipped}")
+            self._log(f"В базу: {', '.join(parts)}")
 
         self.stats.requests = self.client.requests
         self._log(f"Готово. {self.stats.as_text()}")

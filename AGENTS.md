@@ -30,7 +30,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # один 
 
 ```bash
 PYTHONPATH=. .venv/bin/python test/test_chinese_filter.py   # 33 кейса классификатора
-PYTHONPATH=. .venv/bin/python test/test_outreach.py         # 13 кейсов метрик и лимитов
+PYTHONPATH=. .venv/bin/python test/test_outreach.py         # 14 кейсов метрик и лимитов
+PYTHONPATH=. .venv/bin/python test/test_harvest.py          # 22 кейса: пауза, кэш, инкремент
 ```
 
 Важно: тесты надо запускать с `PYTHONPATH=.` из корня. Без этого `test_simple.py`

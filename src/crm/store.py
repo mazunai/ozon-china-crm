@@ -528,12 +528,15 @@ class SellerStore:
 
     # --- Совместимость с очередью рассылки -------------------------------
 
-    def claim_next(self, require_product_url: bool = True) -> Optional[sqlite3.Row]:
+    def claim_next(self, require_product_url: bool = False) -> Optional[sqlite3.Row]:
         """Следующий продавец на отправку и пометка «в работе».
 
         Сортировка по score DESC: сначала самые крупные и долгоживущие.
         Отправляем только подтверждённых — эвристики не берём, чтобы не писать
         российским продавцам.
+
+        Ссылка на товар больше не требуется: чат открывается по странице
+        магазина (`/seller/{id}/`), достаточно самого seller_id.
         """
         with self._connect() as conn:
             where = "status = ? AND verified_by IN (?, ?)"

@@ -154,17 +154,17 @@ def cmd_preview(args) -> int:
 
 def cmd_inspect(args) -> int:
     queue = SellerStore(DB_PATH)
-    rows = [r for r in queue.iter_sellers() if r["sample_product_url"]]
+    rows = [r for r in queue.iter_sellers() if r["verified_by"] in ("uscc", "warehouse")]
     if not rows:
-        print("В очереди нет продавцов с ссылкой на товар. Сначала выполните: import")
+        print("В базе нет подтверждённых продавцов. Сначала выполните: run_harvest.py harvest")
         return 1
 
     row = rows[0]
-    print(f"Открываю товар продавца {row['shop_name'] or row['seller_id']}")
-    print(f"URL: {row['sample_product_url']}\n")
+    print(f"Открываю магазин: {row['shop_name'] or row['seller_id']}")
+    print(f"URL: https://www.ozon.ru/seller/{row['seller_id']}/\n")
     print("Войдите в Ozon в открывшемся окне, если ещё не вошли.\n")
 
-    report = inspect_chat(row["sample_product_url"], DATA_DIR)
+    report = inspect_chat(row["seller_id"], DATA_DIR)
     print(json.dumps(report, ensure_ascii=False, indent=2)[:4000])
 
     if not report.get("logged_in"):

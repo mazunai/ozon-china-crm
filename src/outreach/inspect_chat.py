@@ -102,26 +102,26 @@ def _propose_selectors(data: Dict) -> Dict:
     """Собирает черновик selectors.json из того, что нашлось на странице."""
     header_widgets = data.get("profileMenuWidgets") or []
 
-    login_marker = ""
-    if any("Anonymous" not in w for w in header_widgets):
-        login_marker = '[data-widget="%s"]' % next(
-            w for w in header_widgets if "Anonymous" not in w
-        )
+    # Признак входа. Виджет profileMenu больше не подходит: Ozon сменил
+    # разметку шапки, и [data-widget^=profileMenu] не находит ничего.
+    # Проверено: у залогиненного есть ссылка на личный кабинет.
+    login_marker = 'css|a[href="/my/main"]' if not any(
+        "Anonymous" in w for w in header_widgets
+    ) else ""
 
     chat_button = ""
     if data.get("chatCandidates"):
         chat_button = "text=" + data["chatCandidates"][0]["text"]
 
-    # Первое видимое поле ввода — обычно это и есть поле сообщения.
-    inputs = data.get("inputs") or []
-    message_input = inputs[0]["selector"] if inputs else ""
+    # На странице чата поле ввода ровно одно — привязываемся к тегу, а не к
+    # классу: классы обфусцированы и содержат хеш сборки.
+    textareas = [el for el in (data.get("inputs") or []) if el.get("tag") == "textarea"]
+    message_input = "xpath|//textarea" if textareas else ""
 
-    send_button = ""
-    for candidate in data.get("buttons") or []:
-        text = (candidate.get("text") or "").lower()
-        if any(word in text for word in ("отправить", "send")):
-            send_button = "text=" + candidate["text"]
-            break
+    # Кнопка отправки не имеет ни текста, ни aria-label, ни testid. Она
+    # отличается поведением: заблокирована при пустом поле и разблокируется
+    # после ввода. Структурно это последняя кнопка в блоке с полем ввода.
+    send_button = "xpath|//textarea/ancestor::div[2]//button[last()]" if textareas else ""
 
     return {
         "login_marker": login_marker,
@@ -137,18 +137,27 @@ def _propose_selectors(data: Dict) -> Dict:
     }
 
 
-def inspect_chat(product_url: str, data_dir: Path, dump_html: bool = True) -> Dict:
-    """Открывает карточку товара, раскрывает чат и снимает разметку."""
+def inspect_chat(seller_id: str, data_dir: Path, dump_html: bool = True) -> Dict:
+    """Открывает страницу магазина, нажимает «Написать» и снимает разметку чата.
+
+    Схема проверена на живой странице Ozon: на странице магазина ровно одна
+    кнопка «Написать», она ведёт в чат. Прямая ссылка на чат требует
+    подписанного токена, который генерируется на клиенте, поэтому только клик.
+
+    Селекторы структурные, без классов: Ozon обфусцирует имена классов и
+    добавляет к ним хеш сборки — привязываться к ним нельзя.
+    """
     from selenium.webdriver.common.by import By
 
     from ..utils.selenium_manager import SeleniumManager
 
     manager = SeleniumManager(headless=False)
     driver = manager.create_driver()
-    report: Dict = {"stage": "start", "product_url": product_url}
+    storefront = f"https://www.ozon.ru/seller/{seller_id}/"
+    report: Dict = {"stage": "start", "seller_id": seller_id, "storefront": storefront}
 
     try:
-        driver.get(product_url)
+        driver.get(storefront)
         time.sleep(4)
 
         before = driver.execute_script(COLLECT_SCRIPT)
@@ -169,8 +178,8 @@ def inspect_chat(product_url: str, data_dir: Path, dump_html: bool = True) -> Di
 
         if not candidates:
             report["warning"] = (
-                "Кнопка «Чат» не найдена. Проверьте, что карточка товара "
-                "принадлежит продавцу, с которым можно связаться."
+                "Кнопка «Написать» не найдена на странице магазина. "
+                "Проверьте, что вы залогинены: у незалогиненных этой кнопки нет."
             )
         else:
             driver.execute_script(

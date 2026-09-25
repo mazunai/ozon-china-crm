@@ -224,12 +224,19 @@ class ChatClient:
         self._focus()
         return bool(self._find(self.selectors.login_marker))
 
-    def open_chat(self, product_url: str) -> None:
-        """Открывает карточку товара и раскрывает чат с продавцом."""
-        from selenium.webdriver.common.by import By
+    def open_chat(self, seller_id: str) -> None:
+        """Открывает чат с продавцом через его страницу.
 
+        Схема снята с живой страницы Ozon: на странице магазина ровно одна
+        кнопка «Написать», она ведёт в чат с этим продавцом. Прямая ссылка на
+        чат требует подписанного токена `url_sign`, который генерируется на
+        клиенте при нажатии, поэтому воспроизводим именно нажатие.
+
+        Раньше открывалась карточка товара и искалась кнопка «Чат» — теперь
+        товар не нужен, достаточно seller_id.
+        """
         self._focus()
-        self.driver.get(product_url)
+        self.driver.get(f"https://www.ozon.ru/seller/{seller_id}/")
         self._focus()
         button = self.wait_for(self.selectors.chat_button)
         self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
@@ -239,23 +246,51 @@ class ChatClient:
         except Exception:
             # Кнопку может перекрывать другой элемент — жмём через JS
             self.driver.execute_script("arguments[0].click();", button)
+        # Ждём поле ввода: значит чат действительно открылся
+        self.wait_for(self.selectors.message_input, timeout=max(self.wait_seconds, 25))
 
     def send(self, text: str) -> None:
+        """Печатает текст и нажимает отправку.
+
+        Кнопка отправки заблокирована, пока поле пустое, и разблокируется после
+        ввода — проверено на живой странице.
+        """
         self._focus()
         field = self.wait_for(self.selectors.message_input)
         field.click()
         field.clear()
         field.send_keys(text)
-        time.sleep(0.3)
-        self.wait_for(self.selectors.send_button).click()
+        time.sleep(0.5)
+        button = self.wait_for(self.selectors.send_button)
+        try:
+            button.click()
+        except Exception:
+            self.driver.execute_script("arguments[0].click();", button)
+
+    def field_is_empty(self) -> bool:
+        """Опустело ли поле. Косвенный признак того, что сообщение ушло."""
+        try:
+            field = self.wait_for(self.selectors.message_input, timeout=5)
+            value = field.get_attribute("value") or ""
+            if not value:
+                value = self.driver.execute_script(
+                    "return arguments[0].value || arguments[0].innerText || ''", field) or ""
+            return not str(value).strip()
+        except Exception:                                    # noqa: BLE001
+            return False
 
     def confirm_sent(self) -> bool:
+        """Подтверждает отправку разметкой, а если её нет — очисткой поля.
+
+        Ozon не отдаёт квитанцию, но поле ввода очищается после успешной
+        отправки. Это честнее, чем «нажали кнопку — значит отправили»: при
+        сбое текст останется в поле, и мы отметим попытку как неудачную.
+        """
         self._focus()
-        """Если разметка позволяет подтвердить отправку — проверяем. Иначе считаем,
-        что клик по кнопке отправки и есть отправка (Ozon не отдаёт квитанцию)."""
-        if not self.selectors.sent_marker:
-            return True
-        return bool(self._find(self.selectors.sent_marker))
+        if self.selectors.sent_marker:
+            return bool(self._find(self.selectors.sent_marker))
+        time.sleep(1.0)
+        return self.field_is_empty()
 
 
 def preflight(config: SenderConfig, template, data_dir: Path, store=None,
@@ -329,8 +364,7 @@ def preflight(config: SenderConfig, template, data_dir: Path, store=None,
         health = store.queue_health()
         add("queue", health["ready"] > 0, "Очередь",
             f"готово к отправке {health['ready']}"
-            + (f", с ошибкой {health['failed']}" if health["failed"] else "")
-            + (f", без ссылки на товар {health['no_product']}" if health["no_product"] else ""),
+            + (f", с ошибкой {health['failed']}" if health["failed"] else ""),
             blocking=False)
     else:
         add("queue", True, "Очередь", "не проверялась", blocking=False)
@@ -503,7 +537,7 @@ def run_queue(
             emit("sending", seller_id=seller_id, shop=shop)
 
             try:
-                client.open_chat(row["sample_product_url"])
+                client.open_chat(row["seller_id"])
                 client.send(message)
                 if client.confirm_sent():
                     queue.mark_sent(seller_id, message)

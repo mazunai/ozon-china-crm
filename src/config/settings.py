@@ -7,8 +7,12 @@ class Settings:
     LOGS_DIR = BASE_DIR / "logs"
 
     MAX_PRODUCTS = 50
-    MAX_WORKERS = 10
+    MAX_WORKERS = 2   # camoufox тяжёлый: 1-2 воркера на сервере
     WORKER_TIMEOUT = 30
+
+    # Фильтр «только китайские продавцы»
+    CHINA_ONLY = True          # оставлять в результатах только товары кит. продавцов
+    CHINESE_THRESHOLD = 0.45   # порог уверенности классификатора (0..1)
 
     HEADLESS = True
     IMPLICIT_WAIT = 10

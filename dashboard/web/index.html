@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ozon Parser — китайские продавцы</title>
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#12151d; --panel-2:#171b25; --line:#232837;
+    --text:#e8ebf2; --muted:#8b93a7; --dim:#5d6478;
+    --accent:#3b76ff; --accent-2:#6f9bff; --accent-soft:rgba(59,118,255,.14);
+    --china:#ff4d6d; --china-soft:rgba(255,77,109,.12);
+    --ok:#34d399; --warn:#fbbf24; --err:#f87171;
+    --radius:14px;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:
+      radial-gradient(900px 500px at 85% -10%, rgba(59,118,255,.10), transparent 60%),
+      radial-gradient(700px 400px at 5% 0%, rgba(255,77,109,.06), transparent 55%),
+      var(--bg);
+    color:var(--text);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1560px;margin:0 auto;padding:22px 24px 40px}
+
+  /* ---------- шапка ---------- */
+  .top{display:flex;align-items:center;gap:16px;margin-bottom:18px}
+  .brand{display:flex;align-items:center;gap:12px}
+  .mark{
+    width:38px;height:38px;border-radius:11px;display:grid;place-items:center;
+    background:linear-gradient(140deg,var(--accent),#7c5cff);
+    font-weight:700;font-size:17px;color:#fff;box-shadow:0 6px 20px rgba(59,118,255,.35)
+  }
+  .brand h1{margin:0;font-size:17px;font-weight:650;letter-spacing:.2px}
+  .brand p{margin:1px 0 0;font-size:12px;color:var(--muted)}
+  .top-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+  .pill{
+    display:inline-flex;align-items:center;gap:8px;padding:7px 13px;border-radius:999px;
+    background:var(--panel);border:1px solid var(--line);font-size:12.5px;color:var(--muted)
+  }
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--dim)}
+  .pill.run .dot{background:var(--accent);animation:pulse 1.4s infinite}
+  .pill.done .dot{background:var(--ok)}
+  .pill.err .dot{background:var(--err)}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.8)}}
+
+  /* ---------- карточки ---------- */
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
+  .card-head{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--line)}
+  .card-head h2{margin:0;font-size:13px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;color:var(--muted)}
+
+  /* ---------- контролы ---------- */
+  .controls{padding:16px;display:grid;grid-template-columns:1fr 130px auto;gap:14px;align-items:end;margin-bottom:14px}
+  label.f{display:block;font-size:11.5px;color:var(--muted);margin-bottom:6px;letter-spacing:.2px}
+  input[type=text],input[type=number]{
+    width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);
+    background:var(--panel-2);color:var(--text);font-size:13.5px;outline:none;transition:border-color .15s,box-shadow .15s
+  }
+  input[type=text]:focus,input[type=number]:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .toggle{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:10px;background:var(--panel-2);border:1px solid var(--line);cursor:pointer;user-select:none;font-size:13px}
+  .toggle input{appearance:none;width:34px;height:19px;border-radius:999px;background:#2b3140;position:relative;cursor:pointer;transition:background .15s;flex:0 0 auto}
+  .toggle input:checked{background:var(--china)}
+  .toggle input::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;transition:transform .15s}
+  .toggle input:checked::after{transform:translateX(15px)}
+  .actions{display:flex;gap:9px}
+  button{
+    border:1px solid var(--line);background:var(--panel-2);color:var(--text);
+    padding:10px 16px;border-radius:10px;font-size:13.5px;font-weight:550;cursor:pointer;
+    transition:transform .12s,border-color .15s,background .15s,opacity .15s;white-space:nowrap
+  }
+  button:hover:not(:disabled){transform:translateY(-1px);border-color:#33415c}
+  button:disabled{opacity:.42;cursor:not-allowed}
+  button.primary{background:linear-gradient(140deg,var(--accent),#5b6bff);border-color:transparent;color:#fff;box-shadow:0 6px 18px rgba(59,118,255,.28)}
+  button.danger{border-color:rgba(248,113,113,.4);color:#ffb4b4}
+  button.ghost{background:transparent}
+
+  /* ---------- прогресс ---------- */
+  .progress-card{margin-bottom:14px;padding:14px 16px;display:none}
+  .progress-card.on{display:block}
+  .progress-meta{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);margin-bottom:9px}
+  .progress-meta b{color:var(--text);font-weight:600}
+  .track{height:7px;border-radius:999px;background:#1d2230;overflow:hidden}
+  .fill{height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,var(--accent),#7c5cff);transition:width .5s ease}
+
+  /* ---------- статистика ---------- */
+  .stats{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:14px}
+  .stat{padding:15px 16px}
+  .stat .v{font-size:26px;font-weight:650;letter-spacing:-.4px;font-variant-numeric:tabular-nums}
+  .stat .l{font-size:11.5px;color:var(--muted);margin-top:3px;letter-spacing:.2px}
+  .stat.china .v{color:var(--china)}
+  .stat.ok .v{color:var(--ok)}
+
+  /* ---------- основная сетка ---------- */
+  .grid{display:grid;grid-template-columns:minmax(360px,1fr) minmax(600px,1.7fr);gap:14px;align-items:start}
+  @media (max-width:1180px){.grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}}
+
+  /* ---------- лог ---------- */
+  .log{height:460px;overflow-y:auto;padding:12px 14px;font-family:var(--mono);font-size:12px;line-height:1.65}
+  .log div{display:flex;gap:9px;padding:1px 0;word-break:break-word}
+  .log .t{color:var(--dim);flex:0 0 auto}
+  .log .m{flex:1}
+  .log .WARNING .m{color:var(--warn)}
+  .log .ERROR .m,.log .CRITICAL .m{color:var(--err)}
+  .log .INFO .m{color:#b9c2d4}
+  .log-empty{color:var(--dim);font-family:inherit;font-size:12.5px}
+  .log::-webkit-scrollbar,.table-scroll::-webkit-scrollbar{width:9px;height:9px}
+  .log::-webkit-scrollbar-thumb,.table-scroll::-webkit-scrollbar-thumb{background:#2a3142;border-radius:9px}
+
+  /* ---------- таблица ---------- */
+  .toolbar{display:flex;align-items:center;gap:9px;padding:11px 14px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .chips{display:flex;gap:6px}
+  .row-actions{display:flex;gap:8px}
+  .check{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted,#888);white-space:nowrap}
+  .check input{accent-color:#2f7cf6}
+  .muted{color:var(--muted,#888);font-weight:400;font-size:13px}
+  .sel-status{background:transparent;border:1px solid rgba(255,255,255,.15);border-radius:6px;
+    color:inherit;font:inherit;font-size:12px;padding:3px 6px;cursor:pointer}
+  .note-input{width:100%;background:transparent;border:1px solid transparent;border-radius:6px;
+    color:inherit;font:inherit;font-size:12px;padding:4px 6px}
+  .note-input:hover{border-color:rgba(255,255,255,.12)}
+  .note-input:focus{border-color:#2f7cf6;outline:none;background:rgba(47,124,246,.08)}
+  .uscc{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  .badge-verify{display:inline-block;font-size:11px;padding:1px 6px;border-radius:10px;
+    background:rgba(47,124,246,.15);color:#8ab4f8;margin-left:6px}
+  .badge-verify.warehouse{background:rgba(154,120,255,.15);color:#b39ddb}
+  .chip{padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--muted);font-size:12.5px;cursor:pointer;font-weight:500}
+  .chip.active{background:var(--accent-soft);border-color:rgba(59,118,255,.45);color:var(--accent-2)}
+  .chip.active.china{background:var(--china-soft);border-color:rgba(255,77,109,.45);color:#ff8fa5}
+  .search{flex:1;min-width:150px}
+  .search input{padding:7px 11px;font-size:12.5px}
+  .count{font-size:12px;color:var(--muted);margin-left:auto;font-variant-numeric:tabular-nums}
+  .table-scroll{max-height:520px;overflow:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  thead th{
+    position:sticky;top:0;z-index:1;background:var(--panel-2);text-align:left;
+    padding:10px 12px;font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;
+    color:var(--muted);border-bottom:1px solid var(--line);white-space:nowrap
+  }
+  tbody td{padding:10px 12px;border-bottom:1px solid rgba(35,40,55,.65);vertical-align:middle}
+  tbody tr:hover{background:rgba(59,118,255,.05)}
+  tbody tr.cn{box-shadow:inset 3px 0 0 var(--china)}
+  .ph{width:40px;height:40px;border-radius:9px;object-fit:cover;background:#1d2230;display:block}
+  .pname{max-width:330px}
+  .pname a{color:var(--text);text-decoration:none}
+  .pname a:hover{color:var(--accent-2)}
+  .sub{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .price{font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
+  .old{color:var(--dim);text-decoration:line-through;font-size:11.5px;font-weight:400;margin-left:5px}
+  .badge{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;font-size:11.5px;font-weight:600;white-space:nowrap}
+  .badge.cn{background:var(--china-soft);color:#ff8fa5;border:1px solid rgba(255,77,109,.3)}
+  .badge.ru{background:rgba(52,211,153,.1);color:#6ee7b7;border:1px solid rgba(52,211,153,.28)}
+  .badge.other{background:rgba(139,147,167,.12);color:var(--muted);border:1px solid var(--line)}
+  .conf{display:flex;align-items:center;gap:8px;min-width:96px}
+  .conf .bar{flex:1;height:5px;border-radius:999px;background:#232837;overflow:hidden}
+  .conf .bar i{display:block;height:100%;background:linear-gradient(90deg,#ff8fa5,var(--china))}
+  .conf span{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;width:34px;text-align:right}
+  .empty{padding:52px 20px;text-align:center;color:var(--dim)}
+  .empty .big{font-size:30px;margin-bottom:10px;opacity:.5}
+  .more{padding:12px;text-align:center;border-top:1px solid var(--line)}
+
+  /* ---------- тосты ---------- */
+  .toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:9px;z-index:50}
+  .toast{
+    padding:12px 15px;border-radius:11px;background:var(--panel-2);border:1px solid var(--line);
+    font-size:13px;max-width:400px;box-shadow:0 12px 34px rgba(0,0,0,.5);animation:slide .2s ease
+  }
+  .toast.err{border-color:rgba(248,113,113,.45)}
+  .toast.ok{border-color:rgba(52,211,153,.45)}
+  @keyframes slide{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}
+
+  .warnbar{
+    display:none;margin-bottom:14px;padding:12px 15px;border-radius:12px;
+    background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);color:#ffd98a;font-size:13px
+  }
+  .warnbar.on{display:block}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="brand">
+      <div class="mark">OZ</div>
+      <div>
+        <h1>Ozon Parser</h1>
+        <p>поиск товаров у китайских продавцов</p>
+      </div>
+    </div>
+    <div class="top-right">
+      <div class="pill" id="statusPill"><span class="dot"></span><span id="statusText">Ожидание</span></div>
+    </div>
+  </header>
+
+  <div class="warnbar" id="warnbar"></div>
+
+  <section class="card controls">
+    <div>
+      <label class="f" for="urlInput">Ссылка на категорию или поиск Ozon</label>
+      <input type="text" id="urlInput"
+             value="https://www.ozon.ru/category/elektronika-15500/?from_global=true"
+             placeholder="https://www.ozon.ru/category/... или /search/?text=...">
+    </div>
+    <div>
+      <label class="f" for="maxInput">Лимит товаров</label>
+      <input type="number" id="maxInput" value="50" min="1" max="5000">
+    </div>
+    <div>
+      <label class="f">Фильтр</label>
+      <label class="toggle" title="Оставлять только товары китайских продавцов">
+        <input type="checkbox" id="chinaOnly" checked>
+        <span>Только Китай</span>
+      </label>
+    </div>
+    <div class="actions" style="grid-column:1/-1">
+      <button class="primary" id="btnStart">Запустить парсинг</button>
+      <button class="danger" id="btnStop" disabled>Остановить</button>
+      <button class="ghost" id="btnCsv" disabled>Скачать CSV</button>
+    </div>
+  </section>
+
+  <section class="card progress-card" id="progressCard">
+    <div class="progress-meta">
+      <span id="phaseText">Сбор ссылок</span>
+      <span><b id="pctText">0%</b></span>
+    </div>
+    <div class="track"><div class="fill" id="progressFill"></div></div>
+  </section>
+
+  <section class="stats">
+    <div class="card stat"><div class="v" id="stTotal">0</div><div class="l">Товаров собрано</div></div>
+    <div class="card stat china"><div class="v" id="stChina">0</div><div class="l">Китайских продавцов</div></div>
+    <div class="card stat"><div class="v" id="stOther">0</div><div class="l">Прочие</div></div>
+    <div class="card stat ok"><div class="v" id="stConf">—</div><div class="l">Средняя уверенность</div></div>
+    <div class="card stat"><div class="v" id="stTime">—</div><div class="l">Время парсинга</div></div>
+  </section>
+
+  <main class="grid">
+    <section class="card">
+      <div class="card-head"><h2>Лог парсера</h2></div>
+      <div class="log" id="log"><div class="log-empty">Лог появится после запуска парсинга.</div></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Результаты</h2>
+      </div>
+      <div class="toolbar">
+        <div class="chips">
+          <button class="chip active" data-filter="all">Все</button>
+          <button class="chip china" data-filter="cn">Китай</button>
+          <button class="chip" data-filter="other">Прочие</button>
+        </div>
+        <div class="search"><input type="text" id="searchInput" placeholder="Поиск по товару, продавцу, ИНН"></div>
+        <div class="count" id="countText">0 записей</div>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:52px">Фото</th>
+              <th>Товар</th>
+              <th>Продавец</th>
+              <th>Страна</th>
+              <th>Уверенность</th>
+              <th>Цена</th>
+              <th style="width:44px"></th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <div class="empty" id="emptyState">
+          <div class="big">◔</div>
+          <div>Пока нет данных. Нажмите «Запустить парсинг».</div>
+        </div>
+        <div class="more" id="moreBox" style="display:none">
+          <button class="ghost" id="btnMore">Показать ещё</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Продавцы: читается из базы, а не из памяти, поэтому переживает
+         перезапуск сервера и не пропадает при запуске нового парса. -->
+    <section class="card" style="grid-column:1/-1">
+      <div class="card-head">
+        <h2>Китайские продавцы <span class="muted" id="sellersTotal"></span></h2>
+        <div class="row-actions">
+          <button class="ghost" id="btnSellersReload">Обновить</button>
+        </div>
+      </div>
+      <div class="toolbar">
+        <div class="search"><input type="text" id="sellerSearch" placeholder="Поиск по магазину, компании, USCC, заметке"></div>
+        <label class="check"><input type="checkbox" id="sellerOnlyVerified" checked> только подтверждённые</label>
+        <div class="count" id="sellersCount">0 записей</div>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:70px">Оценка</th>
+              <th>Магазин</th>
+              <th>Регистрация</th>
+              <th style="width:110px">Провинция</th>
+              <th style="width:90px">Заказы</th>
+              <th style="width:90px">Отзывы</th>
+              <th style="width:70px">Срок</th>
+              <th style="width:60px">Рейтинг</th>
+              <th style="width:130px">Статус</th>
+              <th style="width:220px">Заметка</th>
+              <th style="width:80px">Профиль</th>
+            </tr>
+          </thead>
+          <tbody id="sellersBody"></tbody>
+        </table>
+        <div class="empty" id="sellersEmpty">
+          <div class="big">◔</div>
+          <div>База пуста. Соберите продавцов командой<br>
+            <code>python run_harvest.py harvest --pages 10</code></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+(function(){
+  "use strict";
+
+  var state = {
+    products: [],
+    filter: "all",
+    search: "",
+    limit: 120,
+    running: false,
+    finished: false
+  };
+
+  var $ = function(id){ return document.getElementById(id); };
+  var PAGE = 120;
+
+  function fmtNum(n){
+    if (n === null || n === undefined || n === "") return "—";
+    var v = Number(n);
+    if (isNaN(v)) return String(n);
+    return v.toLocaleString("ru-RU");
+  }
+  function fmtMoney(n){
+    if (!n) return "—";
+    return Number(n).toLocaleString("ru-RU") + " ₽";
+  }
+  function fmtTime(sec){
+    if (sec === null || sec === undefined) return "—";
+    sec = Math.max(0, Math.round(sec));
+    if (sec < 60) return sec + " с";
+    var m = Math.floor(sec / 60), s = sec % 60;
+    return m + " м " + (s < 10 ? "0" : "") + s + " с";
+  }
+  function esc(s){
+    return String(s === null || s === undefined ? "" : s)
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;");
+  }
+
+  function toast(msg, kind){
+    var box = document.createElement("div");
+    box.className = "toast " + (kind || "");
+    box.textContent = msg;
+    $("toasts").appendChild(box);
+    setTimeout(function(){ box.remove(); }, 7000);
+  }
+
+  function setStatus(text, cls){
+    $("statusText").textContent = text;
+    $("statusPill").className = "pill " + (cls || "");
+  }
+
+  /* ---------------- лог ---------------- */
+  function addLog(level, line, ts){
+    var box = $("log");
+    if (box.querySelector(".log-empty")) box.innerHTML = "";
+    var row = document.createElement("div");
+    row.className = level || "INFO";
+    var t = ts ? new Date(ts * 1000).toLocaleTimeString("ru-RU") : "";
+    row.innerHTML = '<span class="t">' + esc(t) + '</span><span class="m">' + esc(line) + '</span>';
+    var atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+    box.appendChild(row);
+    while (box.childElementCount > 900) box.removeChild(box.firstChild);
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  /* ---------------- таблица ---------------- */
+  function visibleRows(){
+    return state.products.filter(function(p){
+      if (state.filter === "cn" && !p.is_chinese) return false;
+      if (state.filter === "other" && p.is_chinese) return false;
+      if (state.search){
+        var hay = (p.name + " " + p.seller + " " + p.company + " " + p.inn + " " + p.article).toLowerCase();
+        if (hay.indexOf(state.search) === -1) return false;
+      }
+      return true;
+    });
+  }
+
+  function badge(p){
+    if (p.is_chinese) return '<span class="badge cn">🇨🇳 Китай</span>';
+    if (p.country && p.country !== "Россия") return '<span class="badge other">' + esc(p.country) + '</span>';
+    if (p.country === "Россия") return '<span class="badge ru">Россия</span>';
+    return '<span class="badge other">—</span>';
+  }
+
+  function renderTable(){
+    var rows = visibleRows();
+    var slice = rows.slice(0, state.limit);
+    var tb = $("tbody");
+    tb.innerHTML = slice.map(function(p){
+      var img = p.image
+        ? '<img class="ph" src="' + esc(p.image) + '" loading="lazy" alt="" onerror="this.style.visibility=\'hidden\'">'
+        : '<div class="ph"></div>';
+      var name = esc(p.name || p.article);
+      var link = p.url
+        ? '<a href="' + esc(p.url) + '" target="_blank" rel="noopener">' + name + '</a>'
+        : name;
+      var conf = Math.round((p.confidence || 0) * 100);
+      return '<tr class="' + (p.is_chinese ? "cn" : "") + '">'
+        + '<td>' + img + '</td>'
+        + '<td class="pname">' + link
+        +   '<div class="sub">Артикул ' + esc(p.article) + '</div></td>'
+        + '<td>' + esc(p.company || p.seller || "—")
+        +   (p.inn ? '<div class="sub">ИНН ' + esc(p.inn) + '</div>' : '')
+        +   (p.rating ? '<div class="sub">Рейтинг ' + esc(p.rating) + '</div>' : '') + '</td>'
+        + '<td>' + badge(p) + '</td>'
+        + '<td><div class="conf"><div class="bar"><i style="width:' + conf + '%"></i></div>'
+        +   '<span>' + conf + '%</span></div></td>'
+        + '<td class="price">' + fmtMoney(p.price)
+        +   (p.original_price && p.original_price > p.price
+              ? '<span class="old">' + fmtMoney(p.original_price) + '</span>' : '') + '</td>'
+        + '<td>' + (p.url ? '<a href="' + esc(p.url) + '" target="_blank" rel="noopener" style="color:var(--muted)">↗</a>' : '') + '</td>'
+        + '</tr>';
+    }).join("");
+
+    $("emptyState").style.display = rows.length ? "none" : "block";
+    $("moreBox").style.display = rows.length > state.limit ? "block" : "none";
+    $("countText").textContent = rows.length + " записей";
+  }
+
+  function updateStats(stats){
+    if (!stats) return;
+    if (stats.total !== undefined) $("stTotal").textContent = fmtNum(stats.total);
+    if (stats.chinese !== undefined) $("stChina").textContent = fmtNum(stats.chinese);
+    if (stats.others !== undefined) $("stOther").textContent = fmtNum(stats.others);
+    if (stats.avg_confidence !== undefined){
+      $("stConf").textContent = stats.avg_confidence ? Math.round(stats.avg_confidence * 100) + "%" : "—";
+    }
+    if (stats.elapsed !== undefined) $("stTime").textContent = fmtTime(stats.elapsed);
+  }
+
+  /* ---------------- прогресс ---------------- */
+  function setProgress(phase, value){
+    $("progressCard").classList.add("on");
+    $("phaseText").textContent = phase || "Работа";
+    var v = Math.max(0, Math.min(100, value || 0));
+    $("progressFill").style.width = v + "%";
+    $("pctText").textContent = Math.round(v) + "%";
+  }
+
+  /* ---------------- SSE ---------------- */
+  function connect(){
+    var es = new EventSource("/api/events");
+    es.onmessage = function(e){
+      var ev;
+      try { ev = JSON.parse(e.data); } catch (err) { return; }
+
+      if (ev.type === "log"){
+        addLog(ev.level, ev.line, ev.ts);
+      } else if (ev.type === "progress"){
+        if (state.running) setProgress(ev.phase, ev.value);
+      } else if (ev.type === "status"){
+        applyStatus(ev);
+      } else if (ev.type === "done"){
+        state.running = false;
+        state.finished = true;
+        state.products = ev.products || [];
+        state.limit = PAGE;
+        updateStats(ev.stats);
+        renderTable();
+        $("btnStart").disabled = false;
+        $("btnStop").disabled = true;
+        $("btnCsv").disabled = !state.products.length;
+        setStatus("Готово", "done");
+        setProgress("Готово", 100);
+        toast("Парсинг завершён: " + (ev.stats && ev.stats.chinese || 0) + " китайских продавцов", "ok");
+      }
+    };
+    es.onerror = function(){
+      /* сервер перезапускается — переподключимся */
+      es.close();
+      setTimeout(connect, 3000);
+    };
+  }
+
+  function applyStatus(st){
+    state.running = !!st.running;
+    $("btnStart").disabled = state.running;
+    $("btnStop").disabled = !state.running;
+    if (st.running){
+      setStatus("Работает", "run");
+      setProgress(st.phase, st.progress);
+    } else if (st.phase === "Готово"){
+      setStatus("Готово", "done");
+    }
+    if (st.error) setStatus("Ошибка", "err");
+  }
+
+  /* ---------------- действия ---------------- */
+  function start(){
+    var url = $("urlInput").value.trim();
+    if (!url){ toast("Укажите ссылку на категорию Ozon", "err"); return; }
+    $("btnStart").disabled = true;
+    fetch("/api/start", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        url: url,
+        max_products: parseInt($("maxInput").value, 10) || 50,
+        china_only: $("chinaOnly").checked
+      })
+    }).then(function(r){ return r.json().then(function(j){ return {ok: r.ok, body: j}; }); })
+      .then(function(res){
+        if (!res.ok){
+          toast(res.body.error || "Не удалось запустить", "err");
+          addLog("ERROR", res.body.error || "Не удалось запустить", Date.now()/1000);
+          $("btnStart").disabled = false;
+          setStatus("Ошибка", "err");
+          return;
+        }
+        state.running = true;
+        state.finished = false;
+        state.products = [];
+        state.limit = PAGE;
+        renderTable();
+        updateStats({total:0, chinese:0, others:0, avg_confidence:0, elapsed:0});
+        $("btnStop").disabled = false;
+        $("btnCsv").disabled = true;
+        setStatus("Работает", "run");
+        setProgress("Запуск Chrome", 3);
+      })
+      .catch(function(err){
+        toast("Ошибка сети: " + err, "err");
+        $("btnStart").disabled = false;
+      });
+  }
+
+  function stop(){
+    fetch("/api/stop", {method:"POST"}).then(function(){
+      toast("Остановка...");
+      setStatus("Останавливается", "run");
+    });
+  }
+
+  function downloadCsv(){
+    var rows = visibleRows();
+    if (!rows.length) return;
+    var head = ["Артикул","Товар","Продавец","Компания","ИНН","Страна","Китай","Уверенность","Цена","Старая цена","Ссылка"];
+    var lines = [head.join(";")];
+    rows.forEach(function(p){
+      lines.push([
+        p.article, p.name, p.seller, p.company, p.inn, p.country,
+        p.is_chinese ? "Да" : "Нет",
+        Math.round((p.confidence||0)*100) + "%",
+        p.price, p.original_price || "", p.url
+      ].map(function(v){
+        return '"' + String(v === null || v === undefined ? "" : v).replace(/"/g, '""') + '"';
+      }).join(";"));
+    });
+    var blob = new Blob(["\ufeff" + lines.join("\r\n")], {type:"text/csv;charset=utf-8"});
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "ozon_chinese_sellers.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  /* ---------------- инициализация ---------------- */
+  $("btnStart").addEventListener("click", start);
+  $("btnStop").addEventListener("click", stop);
+  $("btnCsv").addEventListener("click", downloadCsv);
+  $("btnMore").addEventListener("click", function(){ state.limit += PAGE; renderTable(); });
+
+  document.querySelectorAll(".chip").forEach(function(chip){
+    chip.addEventListener("click", function(){
+      document.querySelectorAll(".chip").forEach(function(c){ c.classList.remove("active"); });
+      chip.classList.add("active");
+      state.filter = chip.dataset.filter;
+      state.limit = PAGE;
+      renderTable();
+    });
+  });
+
+  $("searchInput").addEventListener("input", function(e){
+    state.search = e.target.value.trim().toLowerCase();
+    state.limit = PAGE;
+    renderTable();
+  });
+
+  // ---- Продавцы: данные из базы, правки уходят на сервер ----
+  // Используются уже объявленные выше хелперы: $, esc, fmtNum, toast.
+  var sellersState = { labels: {}, verifyLabels: {}, timer: null };
+
+  function renderSellers(payload){
+    var body = $("sellersBody");
+    var rows = payload.rows || [];
+    sellersState.labels = payload.status_labels || sellersState.labels;
+    sellersState.verifyLabels = payload.verify_labels || sellersState.verifyLabels;
+    body.innerHTML = "";
+
+    rows.forEach(function(row){
+      var tr = document.createElement("tr");
+
+      var reg = row.uscc
+        ? '<span class="uscc">' + esc(row.uscc) + '</span>'
+        : esc(row.registration_kind === "ogrnip" ? "ОГРНИП (РФ)" : (row.registration_kind || "—"));
+      var verify = row.verified_by === "uscc" ? "USCC"
+        : (row.verified_by === "warehouse" ? "склад" : "");
+      var badge = verify
+        ? '<span class="badge-verify ' + (row.verified_by === "warehouse" ? "warehouse" : "") + '">' + verify + '</span>'
+        : "";
+
+      var options = Object.keys(sellersState.labels).map(function(key){
+        return '<option value="' + key + '"' + (key === row.status ? " selected" : "") + ">"
+          + esc(sellersState.labels[key]) + "</option>";
+      }).join("");
+
+      tr.innerHTML =
+        '<td><b>' + row.score.toFixed(1) + "</b></td>" +
+        '<td><a href="' + esc(row.seller_profile_url || ("https://www.ozon.ru/seller/" + row.seller_id + "/")) +
+          '" target="_blank" rel="noopener">' + esc(row.shop_name || row.seller_id) + "</a>" + badge +
+          (row.company_name ? '<div class="muted">' + esc(row.company_name) + "</div>" : "") + "</td>" +
+        "<td>" + reg + "</td>" +
+        '<td><span class="muted">' + esc(row.province || "—") + "</span></td>" +
+        "<td>" + fmtNum(row.orders) + "</td>" +
+        "<td>" + fmtNum(row.reviews) + "</td>" +
+        "<td>" + (row.months_on_ozon || 0) + " мес</td>" +
+        "<td>" + (row.rating || 0).toFixed(1) + "</td>" +
+        '<td><select class="sel-status" data-seller="' + esc(row.seller_id) + '">' + options + "</select></td>" +
+        '<td><input class="note-input" data-seller="' + esc(row.seller_id) +
+          '" value="' + esc(row.notes || "") + '" placeholder="заметка…"></td>' +
+        '<td><a href="' + esc(row.seller_profile_url || ("https://www.ozon.ru/seller/" + row.seller_id + "/")) +
+          '" target="_blank" rel="noopener">открыть ↗</a></td>';
+
+      body.appendChild(tr);
+    });
+
+    $("sellersEmpty").style.display = rows.length ? "none" : "block";
+    $("sellersCount").textContent = rows.length + " из " + (payload.total || 0);
+    $("sellersTotal").textContent = payload.total ? "(" + payload.total + ")" : "";
+  }
+
+  function loadSellers(){
+    var params = new URLSearchParams();
+    params.set("limit", "300");
+    params.set("search", $("sellerSearch").value.trim());
+    params.set("verified_only", $("sellerOnlyVerified").checked ? "1" : "0");
+    fetch("/api/sellers?" + params.toString())
+      .then(function(r){
+        if (r.status === 401) { throw new Error("нужен вход"); }
+        return r.json();
+      })
+      .then(renderSellers)
+      .catch(function(err){
+        $("sellersEmpty").style.display = "block";
+        $("sellersEmpty").innerHTML = '<div class="big">◔</div><div>Не удалось загрузить базу: '
+          + esc(err.message || err) + "</div>";
+      });
+  }
+
+  $("btnSellersReload").addEventListener("click", loadSellers);
+  $("sellerSearch").addEventListener("input", function(){
+    clearTimeout(sellersState.timer);
+    sellersState.timer = setTimeout(loadSellers, 250);
+  });
+  $("sellerOnlyVerified").addEventListener("change", loadSellers);
+
+  // Смена статуса: сохраняем сразу, без кнопки
+  $("sellersBody").addEventListener("change", function(event){
+    var select = event.target.closest("select.sel-status");
+    if (!select) return;
+    postJson("/api/seller/status", { seller_id: select.dataset.seller, status: select.value })
+      .then(function(){ toast("Статус сохранён"); })
+      .catch(function(){ toast("Не удалось сохранить статус"); });
+  });
+
+  // Заметка: сохраняем по уходу из поля
+  $("sellersBody").addEventListener("blur", function(event){
+    var input = event.target.closest("input.note-input");
+    if (!input || input.dataset.saved === input.value) return;
+    input.dataset.saved = input.value;
+    postJson("/api/seller/note", { seller_id: input.dataset.seller, note: input.value })
+      .then(function(){ toast("Заметка сохранена"); })
+      .catch(function(){ toast("Не удалось сохранить заметку"); });
+  }, true);
+
+  function postJson(url, payload){
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function(r){
+      if (!r.ok) { throw new Error("HTTP " + r.status); }
+      return r.json();
+    });
+  }
+
+  fetch("/api/status").then(function(r){ return r.json(); }).then(applyStatus).catch(function(){});
+  fetch("/api/results").then(function(r){ return r.json(); }).then(function(res){
+    if (res.products && res.products.length){
+      state.products = res.products;
+      state.finished = true;
+      updateStats(res.stats);
+      renderTable();
+      $("btnCsv").disabled = false;
+      $("progressCard").classList.add("on");
+      setProgress("Готово", 100);
+    }
+  }).catch(function(){});
+
+  loadSellers();
+  connect();
+})();
+</script>
+</body>
+</html>

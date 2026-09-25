@@ -135,3 +135,14 @@ config.txt
 .env.local
 secrets.json
 bot_settings.db
+# Рассылка: очередь, снятые селекторы чата и дампы остаются локально.
+# В шаблонах может быть коммерческий текст, а селекторы привязаны к вашему аккаунту.
+outreach_data/queue.sqlite3
+outreach_data/selectors.json
+outreach_data/selectors.proposed.json
+outreach_data/inspect_dump.html
+outreach_data/STOP
+
+# База CRM и локальные секреты
+data/
+.env

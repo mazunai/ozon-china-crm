@@ -6,8 +6,15 @@ import concurrent.futures
 import html
 from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass
-from ..utils.selenium_manager import SeleniumManager
+from ..utils.browser import create_browser_manager
 from ..utils.resource_manager import resource_manager
+from .chinese_filter import (
+    classify_seller,
+    extract_seller_registration,
+    find_uscc,
+    province_from_uscc,
+    ru_inn_is_valid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +28,18 @@ class SellerInfo:
     reviews_count: str = ""
     working_time: str = ""
     average_rating: str = ""
+    is_chinese: bool = False
+    is_russian: bool = False
+    chinese_confidence: float = 0.0
+    chinese_reasons: str = ""
+    seller_country: str = ""
+    # Данные из блока реквизитов продавца — главное доказательство страны
+    shop_name: str = ""
+    registration_block: str = ""      # сырой текст блока (строки через <br>)
+    address: str = ""                 # адрес регистрации из блока
+    uscc: str = ""                    # 18-значный китайский код, если найден
+    province: str = ""                # провинция Китая из кода региона
+    registration_kind: str = "unknown"  # uscc_cn / ogrn / ogrnip / inn_ru
     success: bool = False
     error: str = ""
 
@@ -28,7 +47,7 @@ class SellerInfo:
 class SellerWorker:
     def __init__(self, worker_id: int):
         self.worker_id = worker_id
-        self.selenium_manager = SeleniumManager()
+        self.selenium_manager = create_browser_manager()
         self.driver = None
         logger.info(f"Воркер продавцов {worker_id} инициализирован")
 
@@ -112,8 +131,34 @@ class SellerWorker:
             widget_states = data['widgetStates']
             seller_info = SellerInfo(seller_id=seller_id)
 
-            # 1. Выбираем лучший textBlock
-            seller_info.company_name, seller_info.inn = self._pick_best_text_block(widget_states)
+            # 1. Блок реквизитов продавца — главный источник страны и USCC.
+            #    В модалке это textBlock с textColor=tertiary: у китайского
+            #    продавца три строки (компания, адрес, 18-значный USCC), у
+            #    российского — две (название, ОГРНИП/ИНН).
+            registration_block = self._find_registration_block(widget_states)
+            if registration_block:
+                parsed = extract_seller_registration(registration_block)
+                seller_info.registration_block = registration_block
+                if parsed.get("company"):
+                    seller_info.company_name = parsed["company"]
+                if parsed.get("registration"):
+                    seller_info.inn = parsed["registration"]
+                seller_info.uscc = parsed.get("uscc", "")
+                seller_info.province = parsed.get("province", "")
+                seller_info.registration_kind = parsed.get("kind", "unknown")
+                if parsed.get("address"):
+                    seller_info.address = parsed["address"]
+
+            # 2. Если реквизиты опознать не удалось — старая эвристика по textBlock
+            if not seller_info.company_name and not seller_info.inn:
+                seller_info.company_name, seller_info.inn = self._pick_best_text_block(widget_states)
+                # ИНН из старой эвристики может оказаться USCC — тогда он не
+                # попал в поле выше, извлечём его явно
+                if not seller_info.uscc:
+                    found_uscc = find_uscc(seller_info.inn)
+                    if found_uscc:
+                        seller_info.uscc = found_uscc
+                        seller_info.province = province_from_uscc(found_uscc)
 
             # 2. cellList – без изменений
             for key, value in widget_states.items():
@@ -132,12 +177,79 @@ class SellerWorker:
             else:
                 seller_info.error = "Не найдена основная информация о продавце"
 
+            # 4. Определяем страну продавца (китайский / иностранный / российский)
+            cls = classify_seller(
+                company_name=seller_info.company_name,
+                inn=seller_info.inn,
+                shop_name=seller_info.shop_name,
+                registration_block=seller_info.registration_block,
+                raw_json=json_content,
+            )
+            seller_info.is_chinese = cls.is_chinese
+            seller_info.is_russian = cls.is_russian
+            seller_info.chinese_confidence = cls.confidence
+            seller_info.chinese_reasons = "; ".join(cls.reasons)
+            if cls.uscc:
+                seller_info.uscc = cls.uscc
+            if cls.province:
+                seller_info.province = cls.province
+            seller_info.seller_country = "Китай" if cls.is_chinese else ("Россия" if cls.is_russian else "")
+
+            logger.info(
+                f"Продавец {seller_id}: страна={seller_info.seller_country} "
+                f"(уверенность {cls.confidence:.2f})"
+            )
+
             return seller_info
 
         except json.JSONDecodeError as e:
             return SellerInfo(seller_id=seller_id, error=f"Ошибка парсинга JSON: {str(e)}")
         except Exception as e:
             return SellerInfo(seller_id=seller_id, error=f"Ошибка обработки данных: {str(e)}")
+
+    def _find_registration_block(self, widget_states: Dict[str, str]) -> str:
+        """Находит блок реквизитов продавца среди textBlock'ов модалки.
+
+        Признаки, проверенные на живых модалках Ozon:
+          * строки склеены через `<br>`;
+          * последняя строка — регистрационный номер: 18-значный китайский USCC
+            либо 15-значный ОГРНИП / 13-значный ОГРН / 10-12-значный ИНН;
+          * у китайского продавца строк три (компания, адрес, код), у
+            российского — две.
+
+        Раньше брался «лучший textBlock» по внутреннему скорингу, и в поле
+        компании попадал текст интерфейса вроде «Фото и видео покупателей» или
+        «Товар закончился» — из-за этого классификатор судил о стране по мусору.
+        """
+        candidates = []
+        for key, value in widget_states.items():
+            if not key.startswith("textBlock-") or not isinstance(value, str):
+                continue
+            if "<br>" not in value:
+                continue
+            for text in re.findall(r'"text"\s*:\s*"((?:[^"\\]|\\.)*)"', value):
+                decoded = text
+                if "\\u" in decoded:
+                    try:
+                        decoded = decoded.encode().decode("unicode_escape", errors="ignore")
+                    except Exception:
+                        pass
+                if "<br>" not in decoded:
+                    continue
+                lines = [part.strip() for part in decoded.split("<br>") if part.strip()]
+                if len(lines) < 2:
+                    continue
+                tail = lines[-1]
+                is_registration = bool(find_uscc(tail)) or bool(re.fullmatch(r"\d{10,15}", tail))
+                if not is_registration:
+                    continue
+                # Три строки (с адресом) приоритетнее двух
+                candidates.append((len(lines), len(decoded), decoded))
+
+        if not candidates:
+            return ""
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][2]
 
     def _pick_best_text_block(self, widget_states: Dict[str, str]) -> Tuple[str, str]:
         best_company, best_inn = "", ""
@@ -219,7 +331,10 @@ class SellerWorker:
         unwanted_phrases = [
             "О магазине", "Оригинальные товары", "Premium магазин",
             "Понятно", "Заказов", "Работает с Ozon", "Средняя оценка",
-            "Количество отзывов", "Это крупный магазин"
+            "Количество отзывов", "Это крупный магазин",
+            # заголовки интерфейса Ozon, которые не являются названием продавца
+            "Фото и видео покупателей", "Отзывы", "Похожие товары",
+            "Вопросы о товаре", "Характеристики",
         ]
         
         company_lower = company.lower() if company else ""
@@ -448,13 +563,14 @@ class OzonSellerParser:
 
     def _calculate_optimal_workers(self, total_sellers: int) -> int:
         if total_sellers <= 10:
-            return 1
+            basis = 1
         elif total_sellers <= 25:
-            return 2
+            basis = 2
         elif total_sellers <= 50:
-            return 3
+            basis = 3
         else:
-            return min(5, self.max_workers)  # Максимум 5 воркеров
+            basis = 5
+        return max(1, min(basis, self.max_workers))
 
     def _parse_multiple_workers(self, seller_ids: List[str], num_workers: int) -> List[SellerInfo]:
         chunks = self._distribute_seller_ids(seller_ids, num_workers)

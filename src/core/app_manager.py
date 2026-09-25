@@ -122,6 +122,17 @@ class AppManager:
         if self.stop_event.is_set():
             return
         
+        # Китайского продавца надёжно видно в карточке магазина (описание, адрес,
+        # реквизиты), а она доступна только на этапе парсинга продавцов. Поэтому здесь
+        # отбрасываем лишь явно российских, чтобы не тратить на них запросы.
+        total_products_found = len(product_results)
+        if self.settings.CHINA_ONLY:
+            product_results = [p for p in product_results if not getattr(p, "is_russian", False)]
+            logger.info(
+                f"Предфильтр: {len(product_results)} из {total_products_found} товаров "
+                f"оставлены (отброшены явно российские продавцы)"
+            )
+        
         seller_ids = []
         for product in product_results:
             if product.seller_id and product.success:
@@ -144,6 +155,25 @@ class AppManager:
         for seller in seller_results:
             if seller.success:
                 seller_data[seller.seller_id] = seller
+
+        # Вердикт по карточке магазина важнее предварительного (по товару):
+        # переносим его в товар, чтобы он попал и в отчёт, и в дашборд
+        for product in product_results:
+            seller = seller_data.get(product.seller_id)
+            if seller is not None:
+                product.is_chinese = seller.is_chinese
+                product.chinese_confidence = seller.chinese_confidence
+                product.chinese_reasons = seller.chinese_reasons
+                product.seller_country = seller.seller_country
+
+        # Окончательный фильтр «только Китай» — по данным карточки магазина
+        if self.settings.CHINA_ONLY:
+            before = len(product_results)
+            kept = [product for product in product_results if product.is_chinese]
+            product_results = kept
+            logger.info(
+                f"Фильтр CHINA_ONLY по магазинам: {len(kept)} из {before} товаров — китайские"
+            )
         
         end_time = time.time()
         total_time = end_time - start_time
@@ -251,6 +281,10 @@ class AppManager:
                     'price': product.price,
                     'original_price': product.original_price,
                     'product_url': product_url,
+                    'is_chinese': getattr(product, 'is_chinese', False),
+                    'chinese_confidence': getattr(product, 'chinese_confidence', 0.0),
+                    'seller_country': getattr(product, 'seller_country', ''),
+                    'chinese_reasons': getattr(product, 'chinese_reasons', ''),
                     'success': product.success,
                     'error': product.error
                 })
@@ -312,6 +346,10 @@ class AppManager:
                     'price': product.price,
                     'original_price': product.original_price,
                     'product_url': product_url,
+                    'is_chinese': getattr(product, 'is_chinese', False),
+                    'chinese_confidence': getattr(product, 'chinese_confidence', 0.0),
+                    'seller_country': getattr(product, 'seller_country', ''),
+                    'chinese_reasons': getattr(product, 'chinese_reasons', ''),
                     'success': product.success,
                     'error': product.error
                 })

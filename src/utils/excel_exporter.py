@@ -33,7 +33,11 @@ class ExcelExporter:
                 'orders_count': ('Заказов', lambda p: p.get('seller', {}).get('orders_count', '')),
                 'reviews_count': ('Отзывов', lambda p: p.get('seller', {}).get('reviews_count', '')),
                 'average_rating': ('Рейтинг', lambda p: p.get('seller', {}).get('average_rating', '')),
-                'working_time': ('Работает с', lambda p: p.get('seller', {}).get('working_time', ''))
+                'working_time': ('Работает с', lambda p: p.get('seller', {}).get('working_time', '')),
+                'is_chinese': ('Китай (да/нет)', lambda p: 'Да' if p.get('is_chinese') else 'Нет'),
+                'chinese_confidence': ('Уверенность Китай', lambda p: p.get('chinese_confidence', 0)),
+                'seller_country': ('Страна продавца', lambda p: p.get('seller_country', '')),
+                'chinese_reasons': ('Причины Китай', lambda p: p.get('chinese_reasons', '')),
             }
             
             # Используем выбранные поля или все по умолчанию

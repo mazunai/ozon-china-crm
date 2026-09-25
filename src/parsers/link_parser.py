@@ -8,7 +8,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from typing import Dict, Tuple
-from ..utils.selenium_manager import SeleniumManager
+from ..utils.browser import create_browser_manager
 from ..utils.resource_manager import resource_manager
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ class OzonLinkParser:
         self.category_url = category_url
         self.max_products = max_products
         self.user_id = user_id
-        self.selenium_manager = SeleniumManager()
+        self.selenium_manager = create_browser_manager()
         self.driver = None
         self.collected_links = {}
         
@@ -70,12 +70,16 @@ class OzonLinkParser:
             if not self.selenium_manager.navigate_to_url(self.category_url):
                 return False
             
-            WebDriverWait(self.driver, 60).until(
-                EC.presence_of_element_located((By.ID, "contentScrollPaginator"))
-            )
-            return True
-            
-        except TimeoutException:
+            # Ждём контейнер товаров опросом: у Camoufox нет WebDriverWait
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                try:
+                    if self.driver.find_elements(By.ID, "contentScrollPaginator"):
+                        return True
+                except Exception:
+                    pass
+                time.sleep(2)
+
             logger.error("Контейнер товаров не найден")
             return False
         except Exception as e:

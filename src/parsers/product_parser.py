@@ -5,9 +5,10 @@ import re
 import time
 import concurrent.futures
 from typing import List, Dict, Optional, Tuple
-from dataclasses import dataclass
-from ..utils.selenium_manager import SeleniumManager
+from dataclasses import dataclass, field
+from ..utils.browser import create_browser_manager
 from ..utils.resource_manager import resource_manager
+from .chinese_filter import classify_seller, ru_inn_is_valid
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,11 @@ class ProductInfo:
     original_price: int = 0
     seller_id: str = ""
     seller_link: str = ""
+    is_chinese: bool = False
+    is_russian: bool = False
+    chinese_confidence: float = 0.0
+    chinese_reasons: str = ""
+    seller_country: str = ""
     success: bool = False
     error: str = ""
 
@@ -30,7 +36,7 @@ class ProductWorker:
     
     def __init__(self, worker_id: int):
         self.worker_id = worker_id
-        self.selenium_manager = SeleniumManager()
+        self.selenium_manager = create_browser_manager()
         self.driver = None
         logger.info(f"Воркер {worker_id} инициализирован")
     
@@ -151,6 +157,19 @@ class ProductWorker:
                     if seller_id:
                         product_info.seller_id = seller_id.group(1)
                         product_info.seller_link = f"https://ozon.ru/seller/{seller_id.group(1)}"
+
+            # Новый формат Ozon: актуальный продавец лежит в виджете webCurrentSeller
+            # (в webStickyProducts поле seller.link теперь часто отсутствует)
+            if not product_info.seller_id:
+                for key, value in widget_states.items():
+                    if not (isinstance(value, str) and key.startswith("webCurrentSeller")):
+                        continue
+                    match = (re.search(r'"sellerId"\s*:\s*"?(\d+)"?', value)
+                             or re.search(r"/seller/(\d+)", value))
+                    if match:
+                        product_info.seller_id = match.group(1)
+                        product_info.seller_link = f"https://ozon.ru/seller/{match.group(1)}"
+                        break
             
             # Ищем информацию о ценах в webPrice
             price_data = self._find_price_data(widget_states)
@@ -164,7 +183,33 @@ class ProductWorker:
                 product_info.success = True
             else:
                 product_info.error = "Не найдена основная информация о товаре"
-            
+
+            # Определяем, китайский ли продавец: классификатор ищет USCC,
+            # явные пометки страны и cross-border маркеры прямо в сыром JSON.
+            cls = classify_seller(
+                company_name=product_info.company_name,
+                inn=product_info.company_inn,
+                # Только виджеты про продавца/магазин: в остальном JSON страницы есть
+                # характеристики товара («Страна-изготовитель: Китай»), из-за которых
+                # российские продавцы китайских товаров попадали в китайские.
+                raw_json=json.dumps(
+                    {k: v for k, v in widget_states.items()
+                     if isinstance(v, str) and ("seller" in k.lower() or "shop" in k.lower())},
+                    ensure_ascii=False,
+                ),
+            )
+            product_info.is_chinese = cls.is_chinese
+            product_info.is_russian = cls.is_russian
+            product_info.chinese_confidence = cls.confidence
+            product_info.chinese_reasons = "; ".join(cls.reasons)
+            product_info.seller_country = "Китай" if cls.is_chinese else ("Россия" if ru_inn_is_valid(product_info.company_inn) else "")
+
+            if product_info.is_chinese:
+                logger.info(
+                    f"Товар {article}: китайский продавец (уверенность {cls.confidence:.2f}): "
+                    f"{product_info.chinese_reasons}"
+                )
+
             return product_info
             
         except json.JSONDecodeError as e:
@@ -263,13 +308,14 @@ class OzonProductParser:
     
     def _calculate_optimal_workers(self, total_links: int) -> int:
         if total_links <= 10:
-            return 1
+            basis = 1
         elif total_links <= 25:
-            return 2
+            basis = 2
         elif total_links <= 50:
-            return 3
+            basis = 3
         else:
-            return min(5, self.max_workers)  # Максимум 5 воркеров
+            basis = 5
+        return max(1, min(basis, self.max_workers))
     
     def _parse_multiple_workers(self, articles: List[str], num_workers: int) -> List[ProductInfo]:
         chunks = self._distribute_articles(articles, num_workers)

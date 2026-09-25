@@ -34,6 +34,17 @@ REPO_ROOT = DASH_DIR.parent
 WEB_DIR = DASH_DIR / "web"
 sys.path.insert(0, str(REPO_ROOT))
 
+# Иконки и манифест отдаём без входа. Их запрашивает сам браузер — в том числе
+# на странице входа и при «Добавить на главный экран», где cookie ни при чём.
+PUBLIC_STATIC = {
+    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+    "/favicon.ico": ("icon-192.png", "image/png"),
+    "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
+    "/icon-192.png": ("icon-192.png", "image/png"),
+    "/icon-512.png": ("icon-512.png", "image/png"),
+    "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
+}
+
 DEFAULT_PORT = 8000
 
 # База продавцов: мини-CRM с заметками и статусами
@@ -245,6 +256,13 @@ LOGIN_PAGE = """<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Вход — Ozon CRM</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Ozon CRM">
 <style>
   :root{--bg1:#0d1017;--bg2:#101c2e;--accent:#2f7cf6;--accent2:#22d3ee;
         --text:#e6e9ef;--dim:#8b93a1;--card:rgba(23,26,33,.72);--line:rgba(255,255,255,.08)}
@@ -282,22 +300,18 @@ LOGIN_PAGE = """<!DOCTYPE html>
   button:hover{filter:brightness(1.1);box-shadow:0 10px 26px rgba(47,124,246,.4)}
   button:active{transform:translateY(1px)}
   .err{margin-top:12px;color:#f87171;font-size:13px;min-height:18px;text-align:center}
-  .hint{margin-top:14px;text-align:center;color:var(--dim);font-size:12px}
-  .hint .dot{display:inline-block;width:8px;height:8px;border-radius:50%;
-    background:linear-gradient(135deg,#34d399,#22d3ee);margin-right:6px;vertical-align:-1px}
   @media (max-width:420px){.wrap{width:100%}}
 </style></head><body>
 <div class="wrap">
   <div class="logo"><span class="mark">O</span><b>Ozon CRM</b></div>
   <form method="POST" action="/api/login">
     <h1>Вход в дашборд</h1>
-    <p>Панель китайских продавцов Ozon</p>
+    <p>Введите пароль, чтобы продолжить</p>
     <label for="pw">Пароль</label>
-    <input type="password" id="pw" name="password" autofocus autocomplete="current-password" placeholder="пароль из .env">
+    <input type="password" id="pw" name="password" autofocus autocomplete="current-password" placeholder="пароль">
     <button type="submit">Войти</button>
     <div class="err">__ERROR__</div>
   </form>
-  <div class="hint"><span class="dot"></span>работает на вашей виртуалке, данные под защитой</div>
 </div>
 </body></html>"""
 
@@ -1313,9 +1327,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": f"Внутренняя ошибка: {exc}"}, 500)
 
     def _do_get(self):
+        path = urlparse(self.path).path
+        if path in PUBLIC_STATIC:
+            name, content_type = PUBLIC_STATIC[path]
+            return self._send_file(WEB_DIR / name, content_type)
         if not self._check_auth():
             return
-        path = urlparse(self.path).path
         if path in ("/", "/index.html"):
             return self._send_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
         if path == "/api/sellers":

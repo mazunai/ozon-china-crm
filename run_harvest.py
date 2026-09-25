@@ -91,6 +91,19 @@ def cmd_harvest(args) -> int:
             print(f"Ошибок: {len(stats.errors)} (первые 5)")
             for error in stats.errors[:5]:
                 print(f"  - {error}")
+        # Машинный итог для ночного автосбора (tools/night_harvest.py): по нему
+        # решается, идти ли дальше по страницам или раздел кончился.
+        if args.json:
+            print("HARVEST_JSON " + json.dumps({
+                "pages": stats.pages,
+                "products": stats.products,
+                "sellers": stats.sellers_found,
+                "uscc": stats.sellers_verified_uscc,
+                "warehouse": stats.sellers_verified_warehouse,
+                "rejected": stats.sellers_rejected,
+                "errors": len(stats.errors),
+                "cancelled": stats.cancelled,
+            }, ensure_ascii=False))
         return 0
     except Exception as exc:                                # noqa: BLE001
         logger.exception("Сбор не удался")
@@ -383,6 +396,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--start-page", type=int, default=1, metavar="N",
                    help="начать со страницы N, не заходя на предыдущие "
                         "(прыжок вглубь раздела для больших обходов чанками; по умолчанию 1)")
+    p.add_argument("--json", action="store_true",
+                   help="допечатать итог строкой HARVEST_JSON (для ночного автосбора)")
     p.set_defaults(func=cmd_harvest)
 
     p = sub.add_parser("list", help="показать продавцов из базы")

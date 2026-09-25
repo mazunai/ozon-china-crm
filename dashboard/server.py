@@ -17,14 +17,17 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import queue
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
 import webbrowser
 from collections import deque
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -254,7 +257,7 @@ SESSION_TOKEN = secrets.token_urlsafe(24)
 
 LOGIN_PAGE = """<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Вход — Ozon CRM</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="any">
@@ -266,10 +269,10 @@ LOGIN_PAGE = """<!DOCTYPE html>
 <style>
   :root{--bg1:#0d1017;--bg2:#101c2e;--accent:#2f7cf6;--accent2:#22d3ee;
         --text:#e6e9ef;--dim:#8b93a1;--card:rgba(23,26,33,.72);--line:rgba(255,255,255,.08)}
-  *{box-sizing:border-box}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
     font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    color:var(--text);padding:20px;
+    color:var(--text);padding:20px;touch-action:manipulation;overscroll-behavior:none;
     background:
       radial-gradient(900px 480px at 15% -10%, rgba(47,124,246,.28), transparent 60%),
       radial-gradient(700px 420px at 90% 110%, rgba(34,211,238,.16), transparent 60%),
@@ -289,7 +292,7 @@ LOGIN_PAGE = """<!DOCTYPE html>
   p{margin:0 0 20px;color:var(--dim);font-size:13px}
   label{display:block;font-size:12px;color:var(--dim);margin-bottom:6px}
   input{width:100%;padding:11px 13px;border-radius:10px;border:1px solid var(--line);
-    background:rgba(13,16,23,.65);color:var(--text);font:inherit;font-size:14px;
+    background:rgba(13,16,23,.65);color:var(--text);font:inherit;font-size:16px;
     transition:border-color .18s, box-shadow .18s}
   input:focus{outline:none;border-color:var(--accent);
     box-shadow:0 0 0 3px rgba(47,124,246,.22)}
@@ -372,6 +375,8 @@ class HarvestRunner:
             pages = max(1, min(int(pages or 10), 500))
 
             # Занимаем браузер, пока сбор не закончится
+            if NIGHT.running():
+                raise ValueError("Идёт ночной сбор — остановите его или дождитесь утра")
             if not BROWSER_LOCK.acquire(blocking=False):
                 raise ValueError("Браузер занят другой задачей — дождитесь её завершения")
             self._holds_browser = True
@@ -501,6 +506,113 @@ class HarvestRunner:
 
 
 HARVEST = HarvestRunner()
+
+
+class NightHarvest:
+    """Ночной обход раздела: длинный сбор чанками, запускается кнопкой.
+
+    Живёт отдельным процессом (tools/night_harvest.py), а не потоком внутри
+    дашборда: обход идёт часами, и перезапуск дашборда не должен его убивать.
+    Никакого расписания — только ручной запуск и ручная остановка; прогресс
+    процесс хранит сам, поэтому после сбоя продолжает с той же страницы.
+    """
+
+    STATE_FILE = DATA_DIR / "night_harvest_state.json"
+    STOP_FILE = DATA_DIR / "night_harvest.stop"
+    LOCK_FILE = DATA_DIR / "night_harvest.lock"
+    LOG_DIR = REPO_ROOT / "logs"
+    SCRIPT = REPO_ROOT / "tools" / "night_harvest.py"
+
+    def _pid(self) -> int:
+        try:
+            return int(self.LOCK_FILE.read_text(encoding="utf-8").strip() or 0)
+        except (OSError, ValueError):
+            return 0
+
+    def running(self) -> bool:
+        """Идёт ли ночной сбор. Смотрим по pid: процесс переживает дашборд."""
+        pid = self._pid()
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    def _log_path(self) -> Path:
+        return self.LOG_DIR / f"night_harvest_{datetime.now().strftime('%Y-%m-%d')}.log"
+
+    def _tail(self, lines: int = 14) -> list:
+        """Хвост сегодняшнего лога — его показываем в дашборде."""
+        path = self._log_path()
+        if not path.exists():
+            return []
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+        return [line for line in text.splitlines() if line.strip()][-lines:]
+
+    def status(self) -> dict:
+        state = {}
+        try:
+            state = json.loads(self.STATE_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = {}
+        totals = state.get("totals") or {}
+        return {
+            "running": self.running(),
+            "stop_requested": self.STOP_FILE.exists(),
+            "next_page": int(state.get("next_page") or 1),
+            "chunks_done": int(state.get("chunks_done") or 0),
+            "updated_at": state.get("updated_at") or "",
+            "days": {
+                "products": int(totals.get("products") or 0),
+                "sellers": int(totals.get("sellers") or 0),
+                "uscc": int(totals.get("uscc") or 0),
+                "errors": int(totals.get("errors") or 0),
+            },
+            "log": self._tail(),
+        }
+
+    def start(self, chunk_pages: int, until: str, pause: float, refresh_days: int) -> None:
+        if self.running():
+            raise ValueError("Ночной сбор уже идёт")
+        if HARVEST.status().get("running"):
+            raise ValueError("Сейчас идёт обычный сбор — дождитесь его окончания")
+        if SEND.status().get("running"):
+            raise ValueError("Идёт рассылка — ночной сбор подождёт её")
+        if not self.SCRIPT.exists():
+            raise ValueError(f"Нет скрипта ночного сбора: {self.SCRIPT}")
+
+        # Старый стоп-кран от прошлого запуска иначе остановит новый сразу
+        if self.STOP_FILE.exists():
+            self.STOP_FILE.unlink()
+
+        command = [
+            sys.executable, str(self.SCRIPT),
+            "--until", until,
+            "--chunk-pages", str(chunk_pages),
+            "--pause", str(pause),
+            "--refresh-days", str(refresh_days),
+        ]
+        self.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with self._log_path().open("a", encoding="utf-8") as handle:
+            subprocess.Popen(
+                command, cwd=str(REPO_ROOT), stdout=handle, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        HUB.publish({"type": "log", "line": f"Ночной сбор запущен: {chunk_pages} страниц за проход, до {until}"})
+
+    def stop(self) -> None:
+        """Просит остановиться: текущий чанк доиграет, новые не начнутся."""
+        self.STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self.STOP_FILE.write_text("стоп\n", encoding="utf-8")
+        HUB.publish({"type": "log", "line": "Ночной сбор: запрошена остановка (докрутит текущий чанк)"})
+
+
+NIGHT = NightHarvest()
 
 
 class SendRunner:
@@ -1374,6 +1486,8 @@ class Handler(BaseHTTPRequestHandler):
                 **HARVEST.status(),
                 "default_url": CHINA_SECTION_URL,
             })
+        if path == "/api/night":
+            return self._send_json(NIGHT.status())
         if path == "/api/send":
             return self._send_json({
                 "state": SEND.status(),
@@ -1548,6 +1662,24 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/harvest/stop":
             HARVEST.stop()
+            return self._send_json({"ok": True})
+
+        if path == "/api/night/start":
+            try:
+                NIGHT.start(
+                    chunk_pages=max(1, min(int(data.get("chunk_pages") or 10), 100)),
+                    until=str(data.get("until") or "08:00").strip() or "08:00",
+                    pause=max(5.0, min(float(data.get("pause") or 180), 3600.0)),
+                    refresh_days=max(0, min(int(data.get("refresh_days") or 7), 365)),
+                )
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+            except Exception as exc:                      # noqa: BLE001
+                return self._send_json({"error": f"Ошибка запуска: {exc}"}, 500)
+            return self._send_json({"ok": True, **NIGHT.status()})
+
+        if path == "/api/night/stop":
+            NIGHT.stop()
             return self._send_json({"ok": True})
 
         if path == "/api/send":

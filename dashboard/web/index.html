@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0b0e14">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="any">
@@ -21,8 +21,11 @@
     --ok:#34d399; --info:#38bdf8; --warn:#fbbf24; --err:#f87171;
     --purple:#a78bfa; --pink:#fb7185;
   }
-  *{box-sizing:border-box}
-  body{margin:0;color:var(--text);
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  /* На телефоне ведём себя как нативное приложение: без двойного тапа-зума,
+     без «резинки» при прокрутке и без выделения служебных элементов. */
+  html{overscroll-behavior:none;-webkit-text-size-adjust:100%}
+  body{margin:0;color:var(--text);touch-action:manipulation;overscroll-behavior-y:none;
     font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
     background:
       radial-gradient(1100px 560px at 88% -12%, rgba(59,130,246,.16), transparent 60%),
@@ -198,7 +201,9 @@
   .log-empty{color:var(--dim)}
   button:focus-visible,a:focus-visible,.tab:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{
     outline:2px solid var(--accent);outline-offset:2px}
-  html{-webkit-text-size-adjust:100%}
+  /* Служебные элементы не выделяются пальцем — как в приложении */
+  .tab,button,.pill,.st-chip,.kpi,th,label.check,.badge-verify,.badge-multi{
+    -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 
   /* ---------- мобильная версия (≤ 767px) ---------- */
   .cards{display:none}
@@ -282,7 +287,7 @@
   <button class="tab active" data-view="overview">Обзор</button>
   <button class="tab" data-view="sellers">Продавцы <span class="badge" id="tabCountSellers"></span></button>
   <button class="tab" data-view="rejected">Отсеянные <span class="badge" id="tabCountRejected"></span></button>
-  <button class="tab" data-view="harvest">Сбор</button>
+  <button class="tab" data-view="harvest">Сбор <span class="badge" id="tabCountHarvest"></span></button>
   <button class="tab" data-view="send">Рассылка <span class="badge" id="tabCountSend"></span></button>
 </nav>
 
@@ -533,6 +538,32 @@
       <h2>Лог</h2>
       <div class="log" id="log"><div class="log-empty">Здесь появятся сообщения сбора.</div></div>
     </div>
+
+    <div class="card">
+      <h2>Ночной сбор · запуск кнопкой</h2>
+      <div class="row">
+        <label class="check">страниц за проход <input type="number" id="nChunk" value="10" min="1" max="100"></label>
+        <label class="check">работать до <input type="text" id="nUntil" value="08:00" style="min-width:72px;width:72px"></label>
+        <label class="check">пауза между проходами, сек <input type="number" id="nPause" value="180" min="5" max="3600"></label>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="btnNightStart">Запустить ночной сбор</button>
+        <button class="ghost" id="btnNightStop" disabled>Остановить</button>
+        <span class="spacer"></span>
+        <span class="pill" id="nightPill">не идёт</span>
+        <button class="ghost" id="btnNightRefresh">Обновить</button>
+      </div>
+      <div class="muted" style="margin-top:8px">
+        Идёт порциями: между порциями пауза, при сбое повторяет ту же страницу,
+        пройденное запоминает — после перезапуска продолжит с места остановки.
+        Сам по расписанию не стартует: только по этой кнопке.
+      </div>
+      <div class="metric-grid" id="nightStats" style="margin-top:12px"></div>
+      <details style="margin-top:4px">
+        <summary class="muted" style="cursor:pointer">Хвост лога ночного сбора</summary>
+        <div class="log" id="nightLog" style="height:220px;margin-top:8px"></div>
+      </details>
+    </div>
   </section>
 </main>
 
@@ -617,6 +648,7 @@
     if (name === "sellers" || name === "rejected") { loadTable(name); }
     if (name === "send") { loadSend(); }
     if (name === "overview") { loadStats(); }
+    if (name === "harvest") { loadNight(); }
   }
   document.querySelectorAll(".tab").forEach(function(t){
     t.addEventListener("click", function(){ showView(t.dataset.view); });
@@ -1135,6 +1167,80 @@
     while (box.childElementCount > 800) { box.removeChild(box.firstChild); }
     if (near) { box.scrollTop = box.scrollHeight; }
   }
+
+  /* ---------- ночной сбор: запускается только кнопкой ---------- */
+  var nightWasRunning = false;
+
+  function renderNight(n){
+    n = n || {};
+    var running = !!n.running;
+    $("btnNightStart").disabled = running;
+    $("btnNightStop").disabled = !running;
+    $("nightPill").className = "pill " + (running ? "run" : "");
+    $("nightPill").textContent = running
+      ? (n.stop_requested ? "останавливается" : "идёт")
+      : (n.chunks_done ? "остановлен" : "не идёт");
+    // Отметка на вкладке — видно с любой страницы, что ночной сбор работает
+    $("tabCountHarvest").textContent = running ? "ночь идёт" : "";
+    $("tabCountHarvest").className = "badge" + (running ? " ok" : "");
+
+    var d = n.days || {};
+    $("nightStats").innerHTML =
+      kpiCard("kp-blue", "Следующая страница", n.next_page, "с неё продолжит") +
+      kpiCard("kp-ok", "Продавцов за ночь", d.sellers, "найдено и обновлено") +
+      kpiCard("kp-purple", "Товаров", d.products, "просмотрено карточек") +
+      kpiCard("kp-blue", "Проходов", n.chunks_done, "порций подряд") +
+      kpiCard("kp-ok", "USCC подтверждено", d.uscc, "по реквизитам") +
+      kpiCard("kp-err", "Ошибок", d.errors, "записей с ошибкой");
+
+    var lines = n.log || [];
+    $("nightLog").innerHTML = lines.length
+      ? lines.map(function(line){ return "<div>" + esc(line) + "</div>"; }).join("")
+      : '<div class="log-empty">Пока пусто — сбор ещё не запускали.</div>';
+  }
+
+  function loadNight(){
+    return fetch("/api/night").then(function(r){ return r.json(); })
+      .then(function(n){
+        // Сбор только что завершился — обновляем таблицу и говорим об этом
+        if (nightWasRunning && !n.running) {
+          toast("Ночной сбор завершён — база обновлена", "ok");
+          loadTable("sellers");
+          loadSummary();
+          loadStats();
+        }
+        nightWasRunning = !!n.running;
+        renderNight(n);
+      }).catch(function(){});
+  }
+
+  $("btnNightStart").addEventListener("click", function(){
+    var chunk = parseInt($("nChunk").value, 10) || 10;
+    var until = ($("nUntil").value || "").trim() || "08:00";
+    var pause = parseFloat($("nPause").value) || 180;
+    if (!confirm("Запустить ночной сбор?\n\nПойдёт порциями по " + chunk +
+                 " страниц, пауза между порциями " + pause + " сек, работать до " + until +
+                 ".\nОстановить можно кнопкой в любой момент.")) { return; }
+    $("btnNightStart").disabled = true;
+    postJson("/api/night/start", {chunk_pages: chunk, until: until, pause: pause})
+      .then(function(res){
+        toast("Ночной сбор запущен", "ok");
+        renderNight(res);
+      })
+      .catch(function(err){
+        $("btnNightStart").disabled = false;
+        toast("Не удалось запустить: " + err.message, "err");
+      });
+  });
+
+  $("btnNightStop").addEventListener("click", function(){
+    postJson("/api/night/stop", {}).then(function(){
+      toast("Останавливаю: текущий проход доиграет", "ok");
+      loadNight();
+    }).catch(function(err){ toast("Не удалось остановить: " + err.message, "err"); });
+  });
+
+  $("btnNightRefresh").addEventListener("click", function(){ loadNight(); });
 
   /* ---------- обзор: цифры и графики ---------- */
   var chartBar = null, chartDonut = null;
@@ -1708,6 +1814,10 @@
   showView(views.indexOf(initial) >= 0 ? initial : "overview");
   connect();
   setInterval(function(){ loadSummary(); loadStats(); }, 60000);
+  // Пока открыта вкладка «Сбор», следим за ночным сбором чаще
+  setInterval(function(){
+    if ($("view-harvest").classList.contains("active")) { loadNight(); }
+  }, 20000);
 })();
 </script>
 </body>

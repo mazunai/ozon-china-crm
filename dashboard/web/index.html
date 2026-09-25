@@ -237,6 +237,7 @@
         <h2 style="margin:0">Готовность к отправке</h2>
         <span class="spacer"></span>
         <span class="pill" id="sendPill">—</span>
+        <button class="ghost" id="btnCheckLogin">Проверить вход в Ozon</button>
         <button class="ghost" id="btnSendRefresh">Перепроверить</button>
       </div>
       <div id="sendChecks" style="margin-top:12px"></div>
@@ -1060,6 +1061,23 @@
   }
 
   $("btnSendRefresh").addEventListener("click", loadSend);
+  $("btnCheckLogin").addEventListener("click", function(){
+    // Открывает браузер с профилем парсера и проверяет, узнаёт ли Ozon сессию.
+    // Без браузера вход проверить нельзя, поэтому это отдельная кнопка.
+    var btn = $("btnCheckLogin");
+    btn.disabled = true;
+    btn.textContent = "Проверяю…";
+    postJson("/api/send/check-login", {}).then(function(res){
+      toast(res.logged_in ? "Вход подтверждён" : ("Вход не подтверждён: " + (res.error || "")),
+            res.logged_in ? "ok" : "err");
+    }).catch(function(err){
+      toast("Не удалось проверить: " + err.message, "err");
+    }).then(function(){
+      btn.disabled = false;
+      btn.textContent = "Проверить вход в Ozon";
+      loadSend();
+    });
+  });
   $("btnSaveSettings").addEventListener("click", function(){
     postJson("/api/send/settings", {
       interval_minutes: parseInt($("sInterval").value, 10),

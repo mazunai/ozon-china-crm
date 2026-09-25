@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src.config.settings import Settings
 from src.outreach.inspect_chat import inspect_chat
 from src.crm.store import SellerStore
-from src.outreach.sender import login_flow
+from src.outreach.sender import check_login_live, login_flow
 from src.outreach.sender import preflight as send_preflight
 from src.outreach.scoring import (
     DEFAULT_WEIGHTS,
@@ -214,6 +214,20 @@ def cmd_check(args) -> int:
               "outreach_data/templates/main.txt")
 
     report = send_preflight(config, template, DATA_DIR, store=SellerStore(DB_PATH))
+
+    # Живая проверка входа: без браузера её не сделать, поэтому по флагу
+    if getattr(args, "live", False):
+        print("Проверяю вход в Ozon (откроется окно браузера)…\n")
+        live = check_login_live(DATA_DIR, on_progress=lambda m: print(f"  {m}"))
+        report["checks"].append({
+            "key": "login", "ok": live["logged_in"],
+            "title": "Вход в Ozon",
+            "detail": "сессия активна" if live["logged_in"] else (live["error"] or "не подтверждён"),
+            "blocking": not config.dry_run,
+        })
+        if not live["logged_in"]:
+            report["ready"] = False
+
     print(f"Готовность: {'ГОТОВО' if report['ready'] else 'НЕ ГОТОВО'}")
     print(f"Режим: {'предпросмотр (не отправляем)' if config.dry_run else 'РЕАЛЬНАЯ ОТПРАВКА'}")
     print()
@@ -325,6 +339,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_login.set_defaults(func=cmd_login)
 
     p_check = sub.add_parser("check", help="проверить готовность к отправке")
+    p_check.add_argument("--live", action="store_true",
+                         help="дополнительно проверить вход в Ozon (откроет браузер)")
     p_check.set_defaults(func=cmd_check)
 
     p_send = sub.add_parser("send", help="запустить рассылку")

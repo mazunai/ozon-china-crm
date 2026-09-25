@@ -428,6 +428,41 @@ def login_flow(data_dir: Path, timeout_seconds: int = 300, on_progress=None) -> 
             pass
 
 
+def check_login_live(data_dir: Path, on_progress=None) -> dict:
+    """Живая проверка входа: открывает браузер и смотрит, узнаёт ли Ozon сессию.
+
+    Без браузера вход проверить нельзя, поэтому это отдельная операция, а не
+    часть обычной проверки готовности: она открывает окно и занимает время.
+    """
+    from ..utils.selenium_manager import SeleniumManager
+
+    result = {"logged_in": False, "error": ""}
+    manager = None
+    try:
+        manager = SeleniumManager(headless=False)
+        driver = manager.create_driver()
+        driver.get("https://www.ozon.ru/")
+        time.sleep(3)
+        selectors = ChatSelectors.load(data_dir / "selectors.json")
+        client = ChatClient(driver, selectors, manager=manager)
+        result["logged_in"] = bool(client.is_logged_in())
+        if not result["logged_in"]:
+            result["error"] = (
+                "Ozon не узнал сессию. Выполните: python run_outreach.py login"
+            )
+    except Exception as exc:                                 # noqa: BLE001
+        result["error"] = str(exc)[:200]
+    finally:
+        if manager is not None:
+            try:
+                manager.close()
+            except Exception:                                # noqa: BLE001
+                pass
+    if on_progress:
+        on_progress("Вход подтверждён" if result["logged_in"] else f"Вход не подтверждён: {result['error']}")
+    return result
+
+
 def build_driver(headless: bool = False):
     """Драйвер с постоянным профилем — в нём живёт ваша сессия Ozon.
 

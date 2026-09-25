@@ -643,6 +643,10 @@ class Hub:
         with self._lock:
             self._subs.discard(q)
 
+    def log(self, line: str, level: str = "INFO") -> None:
+        """Публикует строку в лог. Удобно передавать как колбэк прогресса."""
+        self.publish({"type": "log", "level": level, "ts": time.time(), "line": line})
+
     def publish(self, event: dict) -> None:
         if event.get("type") == "log":
             self.history.append(event)
@@ -1328,6 +1332,11 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as exc:
                 return self._send_json({"error": f"Не удалось: {exc}"}, 500)
             return self._send_json({"ok": True, "active": path_file.exists()})
+
+        if path == "/api/send/check-login":
+            from src.outreach.sender import check_login_live
+            live = check_login_live(SEND.DATA_DIR, on_progress=HUB.log)
+            return self._send_json(live)
 
         if path == "/api/send/settings":
             try:

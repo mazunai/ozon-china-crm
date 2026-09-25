@@ -24,6 +24,7 @@ params отбрасывается: у настоящего листинга para
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -68,6 +69,7 @@ class HarvestStats:
     sellers_verified_warehouse: int = 0
     sellers_rejected: int = 0
     requests: int = 0
+    cancelled: bool = False
     errors: List[str] = field(default_factory=list)
 
     def as_text(self) -> str:
@@ -511,10 +513,14 @@ class ChinaSellerHarvester:
         store: Optional[SellerStore] = None,
         on_progress: Optional[Callable[[str], None]] = None,
         progress_cb: Optional[Callable[[int, int, str], None]] = None,
+        stop_event: Optional["threading.Event"] = None,
     ):
         self.client = client
         self.store = store
         self.on_progress = on_progress
+        # Флаг отмены. Без него кнопка «Остановить» в дашборде была фиктивной:
+        # событие выставлялось, но никто его не читал, и сбор шёл до конца.
+        self.stop_event = stop_event
         # Структурный прогресс для интерфейса: (сделано, всего, фаза).
         # Отдельно от текстового лога, чтобы дашборд рисовал полосу, а не
         # вылавливал числа регулярками из сообщений.
@@ -522,6 +528,10 @@ class ChinaSellerHarvester:
         self.stats = HarvestStats()
         self._seen_products: Set[str] = set()
         self._sellers: Dict[str, dict] = {}
+
+    def cancelled(self) -> bool:
+        """Запрошена ли отмена. Проверяется в каждом цикле обхода."""
+        return bool(self.stop_event is not None and self.stop_event.is_set())
 
     def _report(self, done: int, total: int, phase: str) -> None:
         if not self.progress_cb:
@@ -559,6 +569,10 @@ class ChinaSellerHarvester:
         """Собирает ID товаров из главного листинга раздела."""
         product_ids: List[str] = []
         for page_number in range(1, max(1, pages) + 1):
+            if self.cancelled():
+                self.stats.cancelled = True
+                self._log(f"Отменено на странице {page_number}")
+                break
             path = section_path if page_number == 1 else f"{section_path}?page={page_number}"
             data = self.client.page(path)
             if not data:
@@ -594,6 +608,10 @@ class ChinaSellerHarvester:
         """По товарам находит продавцов: карточка -> seller_id."""
         sellers: Dict[str, dict] = {}
         for index, article in enumerate(product_ids, 1):
+            if self.cancelled():
+                self.stats.cancelled = True
+                self._log(f"Отменено на товаре {index} из {len(product_ids)}")
+                break
             data = self.client.page(f"/product/{article}/")
             if not data:
                 self.stats.errors.append(f"товар {article}: пустой ответ")
@@ -755,6 +773,10 @@ class ChinaSellerHarvester:
             buffer = []
 
         for index, (seller_id, record) in enumerate(sellers.items(), 1):
+            if self.cancelled():
+                self.stats.cancelled = True
+                self._log(f"Отменено на продавце {index} из {len(sellers)}")
+                break
             result = self.enrich_seller(seller_id, record)
             if result:
                 buffer.append(result)

@@ -48,10 +48,15 @@ ENV_PATH = REPO_ROOT / ".env"
 def load_credentials() -> tuple:
     """Читает логин и пароль из окружения или из .env.
 
-    Пустой пароль означает «авторизация выключена» — так удобно на localhost,
-    но при публикации наружу пароль обязателен, и об этом пишется в лог.
+    Пароль обязателен при публикации наружу: дашборд отдаёт бизнес-данные, а
+    SSH-туннель выставляет его в интернет. Для локальной отладки авторизацию
+    можно снять явным флагом OZON_NO_AUTH=1 — «пустая переменная» для этого не
+    годится, потому что тогда подставляется значение из .env.
     """
     import os
+
+    if os.environ.get("OZON_NO_AUTH") == "1":
+        return "admin", ""
 
     user = os.environ.get("OZON_DASHBOARD_USER", "")
     password = os.environ.get("OZON_DASHBOARD_PASSWORD", "")
@@ -114,32 +119,104 @@ class SellersApi:
         except (TypeError, ValueError):
             limit, offset = 100, 0
 
+        # Фильтры приходят списками через запятую: в интерфейсе их можно
+        # выбирать по нескольку сразу (провинции, статусы).
+        def multi(name):
+            raw = query.get(name, "").strip()
+            return [x for x in (part.strip() for part in raw.split(",")) if x] or None
+
         search = query.get("search", "")
         order_by = query.get("order_by", "score")
         descending = query.get("order", "desc").lower() != "asc"
-        status = query.get("status") or None
+        statuses = multi("status")
+        provinces = multi("province")
+        tiers = multi("tier")
         verified_only = query.get("verified_only", "1") not in ("0", "false", "no")
 
         store = self.store()
+        kwargs = dict(statuses=statuses, provinces=provinces, search=search, tiers=tiers)
         rows = store.list_sellers(
             verified_only=verified_only,
-            statuses=[status] if status else None,
-            search=search,
             order_by=order_by,
             descending=descending,
             limit=limit,
             offset=offset,
+            **kwargs,
         )
-        total = store.count_sellers(verified_only=verified_only, search=search)
+        total = store.count_sellers(verified_only=verified_only, **kwargs)
+        companies = store.same_company_counts()
+
+        payload = []
+        for row in rows:
+            item = dict(row)
+            # Сколько ещё витрин у той же компании — подсказка в интерфейсе
+            item["same_company"] = companies.get(item.get("uscc") or "", 1)
+            payload.append(item)
 
         return {
-            "rows": [dict(row) for row in rows],
+            "rows": payload,
             "total": total,
             "limit": limit,
             "offset": offset,
             "status_labels": STATUS_LABELS,
             "verify_labels": VERIFY_LABELS,
+            "provinces": store.province_facets(),
         }
+
+    def export_csv(self, query: dict) -> str:
+        """Выгрузка продавцов в CSV с учётом активных фильтров."""
+        import csv
+        import io
+
+        def multi(name):
+            raw = query.get(name, "").strip()
+            return [x for x in (part.strip() for part in raw.split(",")) if x] or None
+
+        store = self.store()
+        rows = store.list_sellers(
+            verified_only=query.get("verified_only", "1") not in ("0", "false", "no"),
+            statuses=multi("status"),
+            provinces=multi("province"),
+            tiers=multi("tier"),
+            search=query.get("search", ""),
+            order_by=query.get("order_by", "score"),
+            descending=query.get("order", "desc").lower() != "asc",
+            limit=1_000_000,
+            offset=0,
+        )
+
+        columns = [
+            ("seller_id", "seller_id"), ("shop_name", "Магазин"),
+            ("company_name", "Компания"), ("uscc", "USCC"),
+            ("province", "Провинция"), ("verified_by", "Достоверность"),
+            ("orders", "Заказов"), ("reviews", "Отзывов"),
+            ("months_on_ozon", "Месяцев на Ozon"), ("rating", "Рейтинг"),
+            ("score", "Оценка"), ("status", "Статус"), ("notes", "Заметка"),
+            ("seller_profile_url", "Профиль продавца"),
+            ("sample_product_url", "Товар"),
+        ]
+        # BOM и точка с запятой: файл открывают в Excel с русской локалью
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, delimiter=";")
+        writer.writerow([title for _, title in columns])
+        for row in rows:
+            writer.writerow([row[key] for key, _ in columns])
+        return "\ufeff" + buffer.getvalue()
+
+    def detail(self, seller_id: str) -> dict:
+        """Всё по одному продавцу для карточки."""
+        store = self.store()
+        row = store.get_seller(seller_id)
+        if not row:
+            return {}
+        item = dict(row)
+        companies = store.same_company_counts()
+        item["same_company"] = companies.get(item.get("uscc") or "", 1)
+        return item
+
+    def summary(self) -> dict:
+        """Сводка для шапки: сколько чего, когда собирали, когда бэкап."""
+        return self.store().recent_stats()
 
     def sellers_meta(self) -> dict:
         """Справочники для интерфейса: статусы и уровни достоверности."""
@@ -156,12 +233,25 @@ class SellersApi:
         return self.store().stats().as_text()
 
 
+# Задержка между запросами по умолчанию — как в харвестере
+try:
+    from src.crm.harvest import DEFAULT_DELAY
+except Exception:                                            # noqa: BLE001
+    DEFAULT_DELAY = 0.7
+
 CRUD = SellersApi(DB_PATH)
 AUTH = load_credentials()
 
 # Раздел Ozon Global, откуда берутся китайские продавцы. Подставляется в форму
 # как значение по умолчанию — это и есть «та самая ссылка».
 CHINA_SECTION_URL = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/"
+
+# Замок на браузерную сессию. Все задачи, которые лезут в Chrome, делят один
+# профиль и один порт отладки: если запустить две одновременно, они начнут
+# мешать друг другу — переключать вкладки и закрывать их друг у друга. Раньше
+# проверки не было вообще, и «Запустить парсинг» + «Собрать» спокойно работали
+# вдвоём.
+BROWSER_LOCK = threading.Lock()
 
 
 class HarvestRunner:
@@ -190,11 +280,12 @@ class HarvestRunner:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._holds_browser = False
 
     def status(self) -> dict:
         return dict(self.state)
 
-    def start(self, url: str, pages: int) -> None:
+    def start(self, url: str, pages: int, delay: Optional[float] = None) -> None:
         with self._lock:
             if self.state["running"]:
                 raise ValueError("Сбор уже идёт")
@@ -204,7 +295,13 @@ class HarvestRunner:
                 raise ValueError("Укажите ссылку на раздел Ozon")
             pages = max(1, min(int(pages or 10), 200))
 
+            # Занимаем браузер, пока сбор не закончится
+            if not BROWSER_LOCK.acquire(blocking=False):
+                raise ValueError("Браузер занят другой задачей — дождитесь её завершения")
+            self._holds_browser = True
+
             self._stop.clear()
+            self._delay = delay
             self.state.update({
                 "running": True, "url": url, "pages": pages,
                 "phase": "Запускаю браузер", "progress": 0,
@@ -212,14 +309,36 @@ class HarvestRunner:
                 "started_at": time.time(), "finished_at": None,
             })
 
-        self._thread = threading.Thread(target=self._run, args=(url, pages), daemon=True)
+        self._thread = threading.Thread(
+            target=self._run, args=(url, pages, getattr(self, "_delay", None)), daemon=True
+        )
         self._thread.start()
 
-    def stop(self) -> None:
-        self._stop.set()
-        HUB.publish({"type": "log", "line": "Запрошена остановка сбора…"})
+    def _release_browser(self) -> None:
+        if getattr(self, "_holds_browser", False):
+            try:
+                BROWSER_LOCK.release()
+            except RuntimeError:
+                pass
+            self._holds_browser = False
 
-    def _run(self, url: str, pages: int) -> None:
+    def stop(self) -> None:
+        """Просит сбор остановиться. Реально работает: харвестер проверяет
+        флаг в каждом цикле и выходит на ближайшей итерации."""
+        self._stop.set()
+        self.state["phase"] = "Останавливаю…"
+        HUB.publish({"type": "log", "line": "Запрошена остановка сбора…"})
+        HUB.publish({"type": "harvest", **self.state})
+
+    def _release_browser(self) -> None:
+        if self._holds_browser:
+            try:
+                BROWSER_LOCK.release()
+            except RuntimeError:
+                pass
+            self._holds_browser = False
+
+    def _run(self, url: str, pages: int, delay: Optional[float] = None) -> None:
         def log(message: str) -> None:
             HUB.publish({"type": "log", "line": message})
 
@@ -245,13 +364,16 @@ class HarvestRunner:
             manager = create_browser_manager(headless=True)
             driver = manager.create_driver()
             try:
-                client = OzonPageClient(driver, delay=0.7)
+                client = OzonPageClient(
+                    driver, delay=delay if delay is not None else DEFAULT_DELAY
+                )
                 client.ensure_ready()
                 harvester = ChinaSellerHarvester(
                     client=client,
                     store=SellerStore(DB_PATH),
                     on_progress=log,
                     progress_cb=progress,
+                    stop_event=self._stop,
                 )
                 stats = harvester.run(url, pages=pages)
             finally:
@@ -260,8 +382,11 @@ class HarvestRunner:
                 except Exception:                            # noqa: BLE001
                     pass
 
+            self._release_browser()
             self.state.update({
-                "running": False, "phase": "Готово", "progress": 100,
+                "running": False,
+                "phase": "Остановлено" if stats.cancelled else "Готово",
+                "progress": 100,
                 "stats": {
                     "pages": stats.pages, "products": stats.products,
                     "sellers": stats.sellers_found,
@@ -269,18 +394,27 @@ class HarvestRunner:
                     "warehouse": stats.sellers_verified_warehouse,
                     "rejected": stats.sellers_rejected,
                     "requests": stats.requests,
+                    "cancelled": bool(stats.cancelled),
+                    "errors": list(stats.errors)[:20],
                 },
                 "finished_at": time.time(),
             })
-            log(
-                f"Сбор завершён: страниц {stats.pages}, товаров {stats.products}, "
-                f"продавцов {stats.sellers_found} "
-                f"(по USCC {stats.sellers_verified_uscc}, по складу {stats.sellers_verified_warehouse})"
-            )
+            if stats.cancelled:
+                log(
+                    f"Сбор остановлен по запросу: страниц {stats.pages}, "
+                    f"товаров {stats.products}, продавцов проверено {stats.sellers_found}"
+                )
+            else:
+                log(
+                    f"Сбор завершён: страниц {stats.pages}, товаров {stats.products}, "
+                    f"продавцов {stats.sellers_found} "
+                    f"(по USCC {stats.sellers_verified_uscc}, по складу {stats.sellers_verified_warehouse})"
+                )
             HUB.publish({"type": "harvest", **self.state})
             HUB.publish({"type": "harvest_done", "stats": self.state["stats"]})
         except Exception as exc:                             # noqa: BLE001
             logging.getLogger(__name__).exception("Сбор не удался")
+            self._release_browser()
             self.state.update({
                 "running": False, "phase": "Ошибка", "error": str(exc)[:400],
                 "finished_at": time.time(),
@@ -435,6 +569,7 @@ class Service:
         self._manager_error: str = ""
         self._watch_thread = None
         self._lock = threading.Lock()
+        self._holds_browser = False
         self.state = {
             "running": False,
             "phase": "Ожидание",
@@ -493,6 +628,11 @@ class Service:
             if not url or "ozon.ru" not in url:
                 raise ValueError("Укажите ссылку на категорию или поиск Ozon")
 
+            # Тот же замок, что у сбора: браузер один на всех
+            if not BROWSER_LOCK.acquire(blocking=False):
+                raise ValueError("Браузер занят другой задачей — дождитесь её завершения")
+            self._holds_browser = True
+
             manager = self.get_manager()
             manager.settings.MAX_PRODUCTS = max(1, int(max_products))
             manager.settings.CHINA_ONLY = bool(china_only)
@@ -509,6 +649,7 @@ class Service:
 
             ok = manager.start_parsing(final_url, EXPORT_FIELDS)
             if not ok:
+                self._release_browser()
                 raise ValueError("Парсер уже занят другим заданием")
 
             self.state.update({
@@ -551,6 +692,7 @@ class Service:
             self.state["running"] = False
             self.state["finished_at"] = time.time()
             self.state["phase"] = "Готово"
+            self._release_browser()
             self.state["progress"] = 100
             PROGRESS.phase = "Готово"
             PROGRESS.value = 100
@@ -740,10 +882,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:                              # noqa: BLE001
                 pass
 
-        body = "Требуется вход".encode("utf-8")
+        # Тело — JSON, потому что все клиенты разбирают ответ как JSON. На
+        # текстовом теле интерфейс показывал «Ошибка сети: SyntaxError» вместо
+        # понятного «нужен вход».
+        body = json.dumps({"error": "Требуется вход"}, ensure_ascii=False).encode("utf-8")
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="Ozon CRM"')
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -778,6 +923,13 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- GET ---------------------------------------------------------------- #
     def do_GET(self):
+        try:
+            self._do_get()
+        except Exception as exc:                             # noqa: BLE001
+            logging.getLogger(__name__).exception("Ошибка обработки GET %s", self.path)
+            self._send_json({"error": f"Внутренняя ошибка: {exc}"}, 500)
+
+    def _do_get(self):
         if not self._check_auth():
             return
         path = urlparse(self.path).path
@@ -787,6 +939,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(CRUD.sellers(self._query()))
         if path == "/api/sellers/meta":
             return self._send_json(CRUD.sellers_meta())
+        if path == "/api/summary":
+            return self._send_json(CRUD.summary())
+        if path == "/api/seller/detail":
+            seller_id = self._query().get("seller_id", "")
+            detail = CRUD.detail(seller_id)
+            return self._send_json(detail or {"error": "Продавец не найден"},
+                                   200 if detail else 404)
+        if path == "/api/sellers/export.csv":
+            body = CRUD.export_csv(self._query()).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="ozon-sellers.csv"')
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/api/harvest":
             return self._send_json({
                 **HARVEST.status(),
@@ -835,6 +1004,13 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- POST --------------------------------------------------------------- #
     def do_POST(self):
+        try:
+            self._do_post()
+        except Exception as exc:                             # noqa: BLE001
+            logging.getLogger(__name__).exception("Ошибка обработки POST %s", self.path)
+            self._send_json({"error": f"Внутренняя ошибка: {exc}"}, 500)
+
+    def _do_post(self):
         if not self._check_auth():
             return
         path = urlparse(self.path).path
@@ -861,11 +1037,29 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
 
+        if path == "/api/sellers/purge":
+            ids = data.get("seller_ids") or []
+            if not isinstance(ids, list) or not ids:
+                return self._send_json({"error": "Не выбрано ни одной записи"}, 400)
+            # Удаляем только неподтверждённых: подтверждённых сносить по этой
+            # кнопке нельзя, иначе случайное выделение уничтожит рабочие данные.
+            store = CRUD.store()
+            safe = [str(x) for x in ids]
+            rows = store.list_sellers(limit=1_000_000, tiers=["none", "heuristic"])
+            allowed = {r["seller_id"] for r in rows}
+            targets = [x for x in safe if x in allowed]
+            if not targets:
+                return self._send_json({"error": "Среди выбранных нет неподтверждённых"}, 400)
+            return self._send_json({"deleted": store.delete_sellers(targets),
+                                    "skipped": len(safe) - len(targets)})
+
         if path == "/api/harvest":
             try:
+                delay = data.get("delay")
                 HARVEST.start(
                     str(data.get("url", "")).strip(),
                     int(data.get("pages") or 10),
+                    delay=float(delay) if delay is not None else None,
                 )
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)

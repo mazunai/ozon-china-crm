@@ -275,6 +275,48 @@ class SellerStore:
 
     # --- Выборка для дашборда --------------------------------------------
 
+    @staticmethod
+    def _build_filter(
+        verified_only: bool = True,
+        statuses: Optional[Sequence[str]] = None,
+        provinces: Optional[Sequence[str]] = None,
+        search: str = "",
+        tiers: Optional[Sequence[str]] = None,
+    ) -> Tuple[str, List]:
+        """Собирает WHERE и параметры для выборки продавцов.
+
+        Один построитель на список и на подсчёт: раньше условия дублировались,
+        и `count_sellers` не знал про фильтр по статусу — «N из M» врало, как
+        только фильтр появлялся.
+        """
+        where: List[str] = []
+        params: List = []
+
+        if tiers:
+            where.append(f"verified_by IN ({','.join('?' * len(tiers))})")
+            params.extend(tiers)
+        elif verified_only:
+            where.append("verified_by IN (?, ?)")
+            params.extend([VERIFY_USCC, VERIFY_WAREHOUSE])
+
+        if statuses:
+            where.append(f"status IN ({','.join('?' * len(statuses))})")
+            params.extend(statuses)
+
+        if provinces:
+            where.append(f"province IN ({','.join('?' * len(provinces))})")
+            params.extend(provinces)
+
+        if search:
+            where.append(
+                "(shop_name LIKE ? OR company_name LIKE ? OR uscc LIKE ? "
+                "OR notes LIKE ? OR province LIKE ? OR chinese_reasons LIKE ?)"
+            )
+            pattern = f"%{search}%"
+            params.extend([pattern] * 6)
+
+        return (" WHERE " + " AND ".join(where) if where else ""), params
+
     def list_sellers(
         self,
         verified_only: bool = True,
@@ -285,6 +327,8 @@ class SellerStore:
         limit: int = 100,
         offset: int = 0,
         include_unverified: bool = False,
+        provinces: Optional[Sequence[str]] = None,
+        tiers: Optional[Sequence[str]] = None,
     ) -> List[sqlite3.Row]:
         """Список продавцов для дашборда.
 
@@ -293,45 +337,99 @@ class SellerStore:
         """
         allowed_order = {
             "score", "orders", "reviews", "months_on_ozon", "rating",
-            "shop_name", "status", "last_seen_at",
+            "shop_name", "company_name", "province", "status", "last_seen_at",
         }
         order_by = order_by if order_by in allowed_order else "score"
 
-        where, params = [], []
-        if verified_only and not include_unverified:
-            where.append("verified_by IN (?, ?)")
-            params.extend([VERIFY_USCC, VERIFY_WAREHOUSE])
-        if statuses:
-            where.append(f"status IN ({','.join('?' * len(statuses))})")
-            params.extend(statuses)
-        if search:
-            where.append("(shop_name LIKE ? OR company_name LIKE ? OR uscc LIKE ? OR notes LIKE ?)")
-            pattern = f"%{search}%"
-            params.extend([pattern, pattern, pattern, pattern])
-
-        sql = f"SELECT {SELECT_FIELDS} FROM sellers"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += f" ORDER BY {order_by} {'DESC' if descending else 'ASC'} LIMIT ? OFFSET ?"
+        where, params = self._build_filter(
+            verified_only=verified_only and not include_unverified,
+            statuses=statuses,
+            provinces=provinces,
+            search=search,
+            tiers=tiers,
+        )
+        sql = (
+            f"SELECT {SELECT_FIELDS} FROM sellers{where} "
+            f"ORDER BY {order_by} {'DESC' if descending else 'ASC'} LIMIT ? OFFSET ?"
+        )
         params.extend([max(1, limit), max(0, offset)])
 
         with self._connect() as conn:
             return conn.execute(sql, params).fetchall()
 
-    def count_sellers(self, verified_only: bool = True, search: str = "") -> int:
-        where, params = [], []
-        if verified_only:
-            where.append("verified_by IN (?, ?)")
-            params.extend([VERIFY_USCC, VERIFY_WAREHOUSE])
-        if search:
-            where.append("(shop_name LIKE ? OR company_name LIKE ? OR uscc LIKE ? OR notes LIKE ?)")
-            pattern = f"%{search}%"
-            params.extend([pattern, pattern, pattern, pattern])
-        sql = "SELECT COUNT(*) AS n FROM sellers"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
+    def count_sellers(
+        self,
+        verified_only: bool = True,
+        search: str = "",
+        statuses: Optional[Sequence[str]] = None,
+        provinces: Optional[Sequence[str]] = None,
+        tiers: Optional[Sequence[str]] = None,
+    ) -> int:
+        """Число записей под теми же условиями, что и list_sellers."""
+        where, params = self._build_filter(
+            verified_only=verified_only,
+            statuses=statuses,
+            provinces=provinces,
+            search=search,
+            tiers=tiers,
+        )
         with self._connect() as conn:
-            return int(conn.execute(sql, params).fetchone()["n"])
+            return int(conn.execute(f"SELECT COUNT(*) AS n FROM sellers{where}", params).fetchone()["n"])
+
+    def province_facets(self) -> List[Tuple[str, int]]:
+        """Провинции с числом продавцов — для выпадающего фильтра."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT province, COUNT(*) AS n FROM sellers "
+                "WHERE province != '' AND verified_by IN (?, ?) "
+                "GROUP BY province ORDER BY n DESC, province",
+                (VERIFY_USCC, VERIFY_WAREHOUSE),
+            ).fetchall()
+        return [(r["province"], r["n"]) for r in rows]
+
+    def recent_stats(self) -> dict:
+        """Сводка для шапки: сколько подтверждённых, когда собирали, когда бэкап."""
+        import os
+        from datetime import datetime as _dt
+
+        with self._connect() as conn:
+            verified = int(conn.execute(
+                "SELECT COUNT(*) c FROM sellers WHERE verified_by IN (?, ?)",
+                (VERIFY_USCC, VERIFY_WAREHOUSE),
+            ).fetchone()["c"])
+            rejected = int(conn.execute(
+                "SELECT COUNT(*) c FROM sellers WHERE verified_by NOT IN (?, ?)",
+                (VERIFY_USCC, VERIFY_WAREHOUSE),
+            ).fetchone()["c"])
+            last_seen = conn.execute("SELECT MAX(last_seen_at) m FROM sellers").fetchone()["m"] or ""
+            last_province = conn.execute(
+                "SELECT COUNT(DISTINCT province) c FROM sellers WHERE province != ''"
+            ).fetchone()["c"]
+
+        backups = sorted((self.db_path.parent / "backups").glob("sellers-*.sqlite3")) \
+            if (self.db_path.parent / "backups").exists() else []
+
+        return {
+            "verified": verified,
+            "rejected": rejected,
+            "provinces": int(last_province),
+            "last_seen_at": last_seen,
+            "last_backup_at": backups[-1].stat().st_mtime if backups else None,
+            "last_backup_name": backups[-1].name if backups else "",
+            "db_size_bytes": os.path.getsize(self.db_path) if self.db_path.exists() else 0,
+        }
+
+    def same_company_counts(self) -> Dict[str, int]:
+        """Сколько витрин у каждой компании (по USCC).
+
+        Одна китайская компания держит несколько магазинов — писать ей трижды
+        подряд не нужно, поэтому в интерфейсе показываем «ещё N витрин».
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT uscc, COUNT(*) n FROM sellers WHERE uscc != '' GROUP BY uscc"
+            ).fetchall()
+        return {r["uscc"]: int(r["n"]) for r in rows}
 
     def get_seller(self, seller_id: str) -> Optional[sqlite3.Row]:
         with self._connect() as conn:

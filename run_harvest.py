@@ -294,7 +294,8 @@ def cmd_reverify(args) -> int:
             if info.is_china:
                 confirmed += 1
                 store.set_verification_reason(
-                    row["seller_id"], "warehouse", f"склад: {info.reason}"
+                    row["seller_id"], "warehouse", f"склад: {info.reason}",
+                    province=info.region,
                 )
                 mark = "OK  "
             else:

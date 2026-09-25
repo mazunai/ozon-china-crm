@@ -367,7 +367,9 @@ class SellerStore:
         logger.info(f"Удалено записей: {deleted}")
         return deleted
 
-    def set_verification_reason(self, seller_id: str, verified_by: str, reason: str) -> bool:
+    def set_verification_reason(
+        self, seller_id: str, verified_by: str, reason: str, province: Optional[str] = None
+    ) -> bool:
         """Обновляет уровень достоверности и причину вердикта.
 
         Нужно при перепроверке: вторичные признаки (склад) слабее USCC, и по
@@ -379,9 +381,10 @@ class SellerStore:
         with self._connect() as conn:
             cur = conn.execute(
                 "UPDATE sellers SET verified_by = ?, chinese_reasons = ?, "
+                "province = CASE WHEN ? != '' THEN ? ELSE province END, "
                 "is_chinese = ?, updated_at = ? WHERE seller_id = ?",
-                (verified_by, reason, int(verified_by in (VERIFY_USCC, VERIFY_WAREHOUSE)),
-                 _now(), seller_id),
+                (verified_by, reason, province or "", province or "",
+                 int(verified_by in (VERIFY_USCC, VERIFY_WAREHOUSE)), _now(), seller_id),
             )
             return cur.rowcount > 0
 

@@ -670,6 +670,9 @@ class ChinaSellerHarvester:
             verified = VERIFY_NONE
         elif warehouse.get("is_china"):
             verified = VERIFY_WAREHOUSE
+            # У продавца без USCC провинцию взять больше неоткуда, кроме региона
+            # склада. Раньше она оставалась пустой, и в дашборде был прочерк.
+            province = province or warehouse.get("region", "")
         elif classification.is_chinese:
             verified = VERIFY_HEURISTIC
         else:

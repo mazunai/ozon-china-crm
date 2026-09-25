@@ -1,0 +1,5 @@
+# Caddy — обратный прокси с автоматическим HTTPS для дашборда.
+# Кладётся на ВМ: /etc/caddy/Caddyfile (пароль дашборда уходит только по HTTPS).
+ozon.sh-coding.ru {
+	reverse_proxy 127.0.0.1:8000
+}

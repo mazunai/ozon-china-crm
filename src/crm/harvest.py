@@ -79,18 +79,102 @@ class HarvestStats:
         )
 
 
-class OzonPageClient:
-    """Запросы к внутреннему API Ozon из контекста уже открытой страницы.
+# Признаки антибот-челленджа. Проверено на VM: с датацентрового IP главная
+# Ozon отдаёт челлендж (страница ~7 КБ), и fetch из-под такой страницы не
+# работает. При этом сам API по прямому переходу отдаётся нормально — поэтому
+# при челлендже переключаемся на навигацию.
+CHALLENGE_MARKERS = (
+    "challenge", "проверка браузера", "abt-challenge",
+    "checking your browser", "antibot",
+)
+CHALLENGE_MAX_HTML = 20_000
 
-    Ozon отдаёт обычным HTTP-клиентам 403 с заголовком `ozon-antibot`, поэтому
-    все запросы идут через браузер. Используем fetch прямо в странице: это
-    на порядок быстрее, чем навигация на каждый URL, и видно cookies сессии.
+
+class OzonPageClient:
+    """Запросы к внутреннему API Ozon.
+
+    Два способа доставки запроса, и выбор между ними важен:
+
+    * `fetch` из контекста страницы — быстрый (десятые доли секунды), работает
+      на домашнем IP, где страница Ozon открывается нормально;
+    * навигация на URL API — медленнее (1-3 секунды), но работает всегда,
+      включая случай, когда главная под антибот-челленджем: сам API при прямом
+      переходе отдаётся без проверки.
+
+    Режим `auto` начинает с быстрого способа и навсегда переключается на
+    навигацию, если fetch не сработал или страница под челленджем.
     """
 
-    def __init__(self, driver, delay: float = DEFAULT_DELAY):
+    def __init__(self, driver, delay: float = DEFAULT_DELAY, transport: str = "auto"):
         self.driver = driver
         self.delay = delay
         self.requests = 0
+        self.last_error = ""
+        self._origin_ready = False
+        self._transport = transport          # auto | fetch | navigate
+        self._fetch_failures = 0
+
+    def _page_is_challenged(self) -> bool:
+        """Похожа ли текущая страница на антибот-челлендж."""
+        try:
+            source = (self.driver.page_source or "").lower()
+        except Exception:                                # noqa: BLE001
+            return False
+        if not source:
+            return False
+        if len(source) > CHALLENGE_MAX_HTML:
+            return False
+        return any(marker in source for marker in CHALLENGE_MARKERS)
+
+    def _use_fetch(self) -> bool:
+        return self._transport in ("auto", "fetch") and self._fetch_failures == 0
+
+    def _switch_to_navigation(self, reason: str) -> None:
+        if self._transport != "navigate":
+            logger.info(f"Перехожу на прямые запросы к API ({reason})")
+        self._transport = "navigate"
+
+    def ensure_ready(self) -> bool:
+        """Гарантирует, что страница открыта на домене ozon.ru.
+
+        Критично для запросов через fetch: с чужого origin (например `data:,`
+        после неудачного подключения или отката на автоматизированный Chrome)
+        браузер блокирует запрос к ozon.ru как кросс-доменный, и все ответы
+        схлопываются в «Failed to fetch». Симптом обманчив — выглядит как
+        «Ozon не отвечает», хотя дело в origin.
+        """
+        if self._origin_ready:
+            return True
+        try:
+            current = self.driver.current_url or ""
+        except Exception:
+            current = ""
+
+        if "ozon.ru" in current:
+            self._origin_ready = True
+            return True
+
+        logger.info(f"Страница не на ozon.ru (сейчас {current[:60]!r}) — открываю сайт")
+        try:
+            self.driver.get("https://www.ozon.ru/")
+            time.sleep(2)
+            current = self.driver.current_url or ""
+        except Exception as exc:                         # noqa: BLE001
+            self.last_error = f"не удалось открыть ozon.ru: {exc}"
+            logger.error(self.last_error)
+            return False
+
+        if "ozon.ru" not in current:
+            self.last_error = (
+                f"браузер не на ozon.ru (сейчас {current[:80]!r}). "
+                "Похоже, не пройден антибот-челлендж: requests через fetch "
+                "будут блокироваться как кросс-доменные."
+            )
+            logger.error(self.last_error)
+            return False
+
+        self._origin_ready = True
+        return True
 
     def _fetch_raw(self, url: str, method: str, body: Optional[dict]) -> Optional[str]:
         """Забирает текст ответа через fetch в контексте страницы.
@@ -145,48 +229,92 @@ class OzonPageClient:
     def fetch_json(self, path: str, method: str = "GET", body: Optional[dict] = None) -> Optional[dict]:
         """Забирает JSON по внутреннему пути Ozon (например `/api/...`)."""
         self.requests += 1
+
+        # Без правильного origin fetch блокируется браузером, и мы получим
+        # пустые ответы вместо понятной ошибки
+        if not self.ensure_ready():
+            return None
+
         url = path if path.startswith("http") else f"https://www.ozon.ru{path}"
 
-        raw = self._fetch_raw(url, method, body)
+        raw = None
+        if self._use_fetch():
+            if self._page_is_challenged():
+                self._switch_to_navigation("страница под антибот-челленджем")
+            else:
+                raw = self._fetch_raw(url, method, body)
+                if raw is None:
+                    self._fetch_failures += 1
+                    self._switch_to_navigation("fetch не сработал")
+
         if raw is None:
-            # Запасной путь: навигация на URL и чтение JSON из body
-            logger.debug("fetch недоступен, перехожу на навигацию")
             raw = self._fetch_by_navigation(url)
 
         if not raw:
+            self.last_error = f"пустой ответ на {path[:80]}"
             return None
         if isinstance(raw, str) and raw.startswith("ERR:"):
-            logger.debug(f"Ошибка fetch: {raw[:120]}")
+            self.last_error = raw[:200]
+            logger.debug(f"Ошибка fetch: {raw[:160]}")
             return None
 
         try:
             data = json.loads(raw)
         except (TypeError, json.JSONDecodeError) as exc:
-            logger.debug(f"Не JSON в ответе на {path}: {exc}")
+            self.last_error = f"не JSON в ответе на {path[:60]}: {exc}"
             return None
 
         if self.delay:
             time.sleep(self.delay)
         return data if isinstance(data, dict) else None
 
+    def _page_text(self) -> str:
+        """Текст текущей страницы.
+
+        У Selenium и Camoufox разные способы: Camoufox (Playwright) принимает
+        только функцию, а не строку с `return`. Поэтому ветвимся явно.
+        """
+        page = getattr(self.driver, "page", None)
+        if page is not None:
+            try:
+                return page.evaluate("() => document.body ? document.body.innerText : ''") or ""
+            except Exception:                            # noqa: BLE001
+                return ""
+        try:
+            return self.driver.execute_script(
+                "return document.body ? document.body.innerText : ''"
+            ) or ""
+        except Exception:                                # noqa: BLE001
+            return ""
+
     def _fetch_by_navigation(self, url: str) -> Optional[str]:
-        """Медленный, но универсальный способ: открыть URL и прочитать body."""
+        """Медленный, но универсальный способ: открыть URL и прочитать JSON.
+
+        Это основной путь на сервере: с датацентрового IP главная Ozon под
+        антибот-челленджем, но сам API по прямому переходу отдаётся нормально.
+        """
         try:
             self.driver.get(url)
-        except Exception as exc:                     # noqa: BLE001
-            logger.debug(f"Навигация не удалась: {exc}")
+        except Exception as exc:                         # noqa: BLE001
+            self.last_error = f"навигация на {url[:70]} не удалась: {exc}"
+            logger.debug(self.last_error)
             return None
-        for _ in range(30):
-            try:
-                text = (self.driver.page_source or "").strip()
-            except Exception:
-                text = ""
+
+        for _ in range(20):
+            text = (self._page_text() or "").strip()
+            if not text:
+                try:
+                    text = (self.driver.page_source or "").strip()
+                except Exception:                        # noqa: BLE001
+                    text = ""
             start = text.find("{")
             if start >= 0:
                 candidate = text[start:]
                 if "widgetStates" in candidate or '"state"' in candidate:
                     return candidate
             time.sleep(1)
+
+        self.last_error = f"JSON не найден на странице {url[:70]}"
         return None
 
     def page(self, ozon_path: str) -> Optional[dict]:
@@ -421,8 +549,14 @@ class ChinaSellerHarvester:
             path = section_path if page_number == 1 else f"{section_path}?page={page_number}"
             data = self.client.page(path)
             if not data:
-                self.stats.errors.append(f"страница {page_number}: пустой ответ")
-                self._log(f"Страница {page_number}: пусто, останавливаюсь")
+                reason = getattr(self.client, "last_error", "") or "пустой ответ"
+                self.stats.errors.append(f"страница {page_number}: {reason}")
+                self._log(f"Страница {page_number} не получена: {reason}")
+                if page_number == 1:
+                    self._log(
+                        "Первая страница не открылась — дальше идти бессмысленно. "
+                        "Проверьте, что браузер прошёл антибот Ozon."
+                    )
                 break
 
             items = extract_main_grid_items(data.get("widgetStates") or {}, data.get("layout"))

@@ -217,6 +217,7 @@ class SeleniumManager:
         self.wait = WebDriverWait(driver, 20)
         self._attached = True
         self._apply_stealth(driver)
+        self._ensure_usable_page()
         self._open_own_tab()
         logger.info(f"Подключено к обычному Chrome (обход антибота), вкладка {self._tab_handle}")
         return driver
@@ -229,16 +230,47 @@ class SeleniumManager:
         продавца A, другой уводит ту вкладку на продавца B, и первый читает
         чужие реквизиты. Именно так китайские компании приписывались российским
         магазинам.
+
+        Handle берём из `current_window_handle`, а НЕ из возврата `new_window`:
+        при подключении через debuggerAddress метод может вернуть None, и тогда
+        вкладка теряется, а привязка молча перестаёт работать.
         """
         if not self.driver:
             return
         try:
-            self._tab_handle = self.driver.switch_to.new_window("tab")
+            self.driver.switch_to.new_window("tab")
+            self._tab_handle = self.driver.current_window_handle
+            if not self._tab_handle:
+                raise RuntimeError("current_window_handle пуст после new_window")
         except Exception as exc:                            # noqa: BLE001
-            # Старый Chrome/Selenium может не поддерживать new_window — тогда
-            # продолжаем в текущей вкладке, но честно предупреждаем в логе.
-            logger.warning(f"Не удалось открыть отдельную вкладку ({exc}) — работаю в текущей")
+            logger.warning(
+                f"Не удалось открыть отдельную вкладку ({exc}). "
+                "Воркеры будут делить одну вкладку — при параллельном парсинге "
+                "это даёт перепутанные данные, поэтому работаем в один поток."
+            )
             self._tab_handle = None
+
+    def has_own_tab(self) -> bool:
+        """Есть ли у воркера своя вкладка. Нужно для решения о параллельности."""
+        return bool(self._tab_handle) and self._attached
+
+    def _ensure_usable_page(self) -> bool:
+        """Убеждается, что есть открытая вкладка и в ней хоть что-то загружено.
+
+        Chrome, оставленный предыдущим запуском, может не иметь ни одной
+        страницы: тогда подключение к нему падает с «unable to discover open
+        pages». Проверяем и при необходимости открываем вкладку сами.
+        """
+        if not self.driver:
+            return False
+        try:
+            if not self.driver.window_handles:
+                self.driver.switch_to.new_window("tab")
+                return True
+            return True
+        except Exception as exc:                            # noqa: BLE001
+            logger.warning(f"Не удалось обеспечить открытую вкладку: {exc}")
+            return False
 
     def _focus_tab(self) -> None:
         """Делает активной вкладку этого воркера перед любой операцией."""

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 from .queue_db import OutreachQueue
+from ..crm.store import STATUS_NEW
 
 logger = logging.getLogger(__name__)
 
@@ -185,10 +186,14 @@ def kill_switch_active(stop_file: Path) -> bool:
 class ChatClient:
     """Тонкая обёртка над DOM чата. Всё, что зависит от разметки Ozon, — здесь."""
 
-    def __init__(self, driver, selectors: ChatSelectors, wait_seconds: int = 15):
+    def __init__(self, driver, selectors: ChatSelectors, wait_seconds: int = 15, manager=None):
         self.driver = driver
         self.selectors = selectors
         self.wait_seconds = wait_seconds
+        self.manager = manager
+
+    def _focus(self) -> None:
+        focus_tab(self.manager)
 
     def _find(self, selector: str):
         from selenium.webdriver.common.by import By
@@ -216,13 +221,16 @@ class ChatClient:
         raise TimeoutException(f"Не дождались элемента: {selector}")
 
     def is_logged_in(self) -> bool:
+        self._focus()
         return bool(self._find(self.selectors.login_marker))
 
     def open_chat(self, product_url: str) -> None:
         """Открывает карточку товара и раскрывает чат с продавцом."""
         from selenium.webdriver.common.by import By
 
+        self._focus()
         self.driver.get(product_url)
+        self._focus()
         button = self.wait_for(self.selectors.chat_button)
         self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
         time.sleep(0.5)
@@ -233,6 +241,7 @@ class ChatClient:
             self.driver.execute_script("arguments[0].click();", button)
 
     def send(self, text: str) -> None:
+        self._focus()
         field = self.wait_for(self.selectors.message_input)
         field.click()
         field.clear()
@@ -241,6 +250,7 @@ class ChatClient:
         self.wait_for(self.selectors.send_button).click()
 
     def confirm_sent(self) -> bool:
+        self._focus()
         """Если разметка позволяет подтвердить отправку — проверяем. Иначе считаем,
         что клик по кнопке отправки и есть отправка (Ozon не отдаёт квитанцию)."""
         if not self.selectors.sent_marker:
@@ -248,12 +258,119 @@ class ChatClient:
         return bool(self._find(self.selectors.sent_marker))
 
 
+def preflight(config: SenderConfig, template, data_dir: Path, store=None,
+              now: Optional[datetime] = None) -> dict:
+    """Проверяет всё, что нужно для отправки, и возвращает готовность.
+
+    Раньше эти проверки были разбросаны: часть в CLI, часть в тексте README,
+    часть вообще нигде. Панель, вызывающая отправку напрямую, могла разослать
+    шаблон-заготовку «ЗАМЕНИТЕ ЭТОТ ТЕКСТ», потому что проверку делал только
+    разбор аргументов командной строки.
+    """
+    now = now or datetime.now()
+    checks = []
+
+    def add(key: str, ok: bool, title: str, detail: str = "", blocking: bool = True) -> None:
+        checks.append({"key": key, "ok": bool(ok), "title": title,
+                       "detail": detail, "blocking": blocking})
+
+    # Шаблон
+    if template is None:
+        add("template", False, "Текст сообщения", "шаблон не загружен")
+    elif getattr(template, "is_placeholder", lambda: False)():
+        add("template", False, "Текст сообщения",
+            "в шаблоне осталась метка-заготовка — напишите свой текст")
+    else:
+        add("template", True, "Текст сообщения", f"«{template.name}»",
+            blocking=False)
+
+    # Селекторы чата
+    selectors_path = data_dir / "selectors.json"
+    if not selectors_path.exists():
+        add("selectors", False, "Разметка чата",
+            "нет selectors.json — выполните: python run_outreach.py inspect")
+    else:
+        try:
+            selectors = ChatSelectors.load(selectors_path)
+            missing = selectors.missing()
+            if missing:
+                add("selectors", False, "Разметка чата",
+                    "не заполнено: " + ", ".join(missing))
+            else:
+                add("selectors", True, "Разметка чата", "настроена", blocking=False)
+        except Exception as exc:                           # noqa: BLE001
+            add("selectors", False, "Разметка чата", str(exc)[:120])
+
+    # Стоп-кран
+    stop_file = data_dir / config.stop_file
+    if kill_switch_active(stop_file):
+        add("stop", False, "Стоп-кран", f"файл {stop_file.name} на месте — отправка остановлена")
+    else:
+        add("stop", True, "Стоп-кран", "нет", blocking=False)
+
+    # Дневной лимит
+    sent_today = store.sent_today() if store is not None and hasattr(store, "sent_today") else 0
+    left = max(0, config.daily_cap - sent_today)
+    add("cap", left > 0, "Дневной лимит",
+        f"отправлено сегодня {sent_today} из {config.daily_cap}"
+        + ("" if left else " — предел достигнут"),
+        blocking=not config.dry_run and left == 0)
+
+    # Рабочее окно
+    start, end = parse_window(config.window_start, config.window_end)
+    inside = in_window(now.time(), start, end)
+    add("window", inside, "Рабочее окно",
+        f"{config.window_start}–{config.window_end}, сейчас "
+        + ("внутри" if inside else "вне окна"),
+        blocking=not config.dry_run and not inside)
+
+    # Очередь
+    if store is not None and hasattr(store, "queue_health"):
+        health = store.queue_health()
+        add("queue", health["ready"] > 0, "Очередь",
+            f"готово к отправке {health['ready']}"
+            + (f", с ошибкой {health['failed']}" if health["failed"] else "")
+            + (f", без ссылки на товар {health['no_product']}" if health["no_product"] else ""),
+            blocking=False)
+    else:
+        add("queue", True, "Очередь", "не проверялась", blocking=False)
+
+    blocking_failed = [c for c in checks if c["blocking"] and not c["ok"]]
+    return {
+        "checks": checks,
+        "ready": not blocking_failed,
+        "blocking": [c["key"] for c in blocking_failed],
+        "dry_run": config.dry_run,
+        "sent_today": sent_today,
+        "daily_cap": config.daily_cap,
+    }
+
+
 def build_driver(headless: bool = False):
-    """Драйвер с постоянным профилем — в нём живёт ваша сессия Ozon."""
+    """Драйвер с постоянным профилем — в нём живёт ваша сессия Ozon.
+
+    Возвращаем и менеджер: через него закрываем только свою вкладку (а не весь
+    Chrome) и переключаемся на неё перед каждой операцией.
+    """
     from ..utils.selenium_manager import SeleniumManager
 
     manager = SeleniumManager(headless=headless)
     return manager, manager.create_driver()
+
+
+def focus_tab(manager) -> None:
+    """Делает активной вкладку этого процесса.
+
+    Без этого при параллельном сборе или парсинге активной может оказаться
+    чужая вкладка, и ввод текста уйдёт не на ту страницу — тот же класс бага,
+    что был у парсеров с перепутанными данными продавцов.
+    """
+    if manager is None:
+        return
+    try:
+        manager._focus_tab()
+    except Exception:                                      # noqa: BLE001
+        pass
 
 
 # --- Основной цикл --------------------------------------------------------
@@ -267,6 +384,8 @@ def run_queue(
     once: bool = False,
     on_progress: Optional[Callable[[str], None]] = None,
     now_fn: Callable[[], datetime] = datetime.now,
+    stop_event=None,
+    on_event: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """Прогоняет очередь с соблюдением ограничителей.
 
@@ -278,21 +397,49 @@ def run_queue(
     stop_file = data_dir / config.stop_file
     next_allowed_at: Optional[datetime] = None
 
+    def cancelled() -> bool:
+        """Отмена: файл-стоп-кран или внешний флаг."""
+        if kill_switch_active(stop_file):
+            return True
+        return bool(stop_event is not None and stop_event.is_set())
+
     def progress(message: str) -> None:
         logger.info(message)
         if on_progress:
             on_progress(message)
 
+    def emit(kind: str, **payload) -> None:
+        """Структурное событие для интерфейса: без вылавливания чисел из текста."""
+        if on_event:
+            try:
+                on_event({"kind": kind, **payload})
+            except Exception:                              # noqa: BLE001
+                pass
+
+    def rest(seconds: int) -> bool:
+        """Пауза с проверкой отмены. Возвращает False, если пора выходить.
+
+        Раньше тут был один time.sleep до 300 секунд без проверок: нажатие
+        «Остановить» могло ждать до пяти минут.
+        """
+        deadline = time.time() + max(0, seconds)
+        while time.time() < deadline:
+            if cancelled():
+                return False
+            time.sleep(min(1.0, max(0.0, deadline - time.time())))
+        return not cancelled()
+
     queue.release_stale()
 
     driver = None
+    manager = None
     if not config.dry_run:
-        _, driver = build_driver(headless=False)
+        manager, driver = build_driver(headless=False)
         selectors = ChatSelectors.load(data_dir / "selectors.json")
         missing = selectors.missing()
         if missing:
             raise RuntimeError(f"Не заполнены селекторы: {', '.join(missing)}")
-        client = ChatClient(driver, selectors)
+        client = ChatClient(driver, selectors, manager=manager)
         if not client.is_logged_in():
             raise RuntimeError(
                 "В браузере нет залогиненной сессии Ozon. "
@@ -303,20 +450,46 @@ def run_queue(
 
     try:
         while True:
-            if kill_switch_active(stop_file):
-                report["stopped_reason"] = f"сработал стоп-кран {stop_file.name}"
+            if cancelled():
+                report["stopped_reason"] = (
+                    "сработал стоп-кран" if kill_switch_active(stop_file) else "остановлено вручную"
+                )
                 progress(report["stopped_reason"])
                 break
 
-            decision = should_send_now(now_fn(), config, queue.sent_last_24h(), next_allowed_at)
+            decision = should_send_now(now_fn(), config, queue.sent_today(), next_allowed_at)
             if not decision.allowed:
                 if once:
                     report["stopped_reason"] = decision.reason
                     progress(f"Стоп: {decision.reason}")
                     break
+                emit("waiting", reason=decision.reason, seconds=decision.retry_in_seconds)
                 progress(f"Ждём {decision.retry_in_seconds} с — {decision.reason}")
-                time.sleep(min(decision.retry_in_seconds, 300))
+                if not rest(min(decision.retry_in_seconds, 300)):
+                    continue
                 continue
+
+            # Предпросмотр НЕ трогает очередь: раньше claim_next списывал попытку
+            # и ставил статус «пропущен» до проверки dry_run, то есть один клик
+            # «предпросмотр» сжигал продавца. Теперь просто показываем первого
+            # кандидата, ничего не меняя.
+            if config.dry_run:
+                candidates = queue.list_sellers(
+                    verified_only=True, statuses=[STATUS_NEW], limit=1, offset=0
+                ) if hasattr(queue, "list_sellers") else []
+                if not candidates:
+                    report["stopped_reason"] = "очередь пуста"
+                    progress(report["stopped_reason"])
+                    break
+                row = candidates[0]
+                shop = row["shop_name"] or row["seller_id"]
+                message = template.render(dict(row))
+                progress(f"[предпросмотр] {shop} — кому: {row['sample_product_url']}")
+                progress(f"[предпросмотр] текст:\n{message}")
+                emit("preview", seller_id=row["seller_id"], shop=shop, message=message)
+                report["stopped_reason"] = "режим предпросмотра"
+                report["preview"] = {"seller_id": row["seller_id"], "shop": shop, "message": message}
+                break
 
             row = queue.claim_next()
             if not row:
@@ -327,13 +500,7 @@ def run_queue(
             seller_id = row["seller_id"]
             shop = row["shop_name"] or seller_id
             message = template.render(dict(row))
-
-            if config.dry_run:
-                progress(f"[предпросмотр] {shop} — кому: {row['sample_product_url']}")
-                progress(f"[предпросмотр] текст:\n{message}")
-                queue.mark_skipped(seller_id)
-                report["stopped_reason"] = "режим предпросмотра"
-                break
+            emit("sending", seller_id=seller_id, shop=shop)
 
             try:
                 client.open_chat(row["sample_product_url"])
@@ -341,13 +508,20 @@ def run_queue(
                 if client.confirm_sent():
                     queue.mark_sent(seller_id, message)
                     report["sent"] += 1
+                    emit("sent", seller_id=seller_id, shop=shop, total=report["sent"])
                 else:
                     queue.mark_failed(seller_id, "не подтвердилась отправка", retryable=True)
+                    if hasattr(queue, "log_message"):
+                        queue.log_message(seller_id, message, "failed", "не подтвердилась отправка")
                     report["failed"] += 1
+                    emit("failed", seller_id=seller_id, shop=shop, error="не подтвердилась отправка")
             except Exception as exc:                       # noqa: BLE001
                 retryable = int(row["attempts"] or 0) < config.max_attempts
                 queue.mark_failed(seller_id, str(exc), retryable=retryable)
+                if hasattr(queue, "log_message"):
+                    queue.log_message(seller_id, message, "failed", str(exc))
                 report["failed"] += 1
+                emit("failed", seller_id=seller_id, shop=shop, error=str(exc)[:200])
 
             next_allowed_at = now_fn() + timedelta(seconds=plan_next_delay(config))
 
@@ -355,9 +529,12 @@ def run_queue(
                 report["stopped_reason"] = "режим одной отправки"
                 break
     finally:
-        if driver is not None:
+        # Закрываем ТОЛЬКО свою вкладку: Chrome общий, в нём живёт сессия Ozon.
+        # Раньше здесь был driver.quit(), который убивал браузер целиком —
+        # в отличие от парсеров, которые оставляют его живым.
+        if manager is not None:
             try:
-                driver.quit()
+                manager.close()
             except Exception:                              # noqa: BLE001
                 pass
 

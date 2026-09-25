@@ -427,6 +427,205 @@ class HarvestRunner:
 HARVEST = HarvestRunner()
 
 
+class SendRunner:
+    """Отправка сообщений из дашборда.
+
+    Работает с ОБЩЕЙ базой продавцов (`data/sellers.sqlite3`), а не с
+    отдельной очередью в `outreach_data/` — раньше отправка смотрела в файл,
+    которого не существует, и отправлять было физически некому.
+    """
+
+    DATA_DIR = REPO_ROOT / "outreach_data"
+    TEMPLATES_DIR = DATA_DIR / "templates"
+    CONFIG_FILE = DATA_DIR / "sender.json"
+
+    def __init__(self):
+        self.state = {
+            "running": False, "phase": "", "sent": 0, "failed": 0,
+            "error": "", "dry_run": True, "last_event": {},
+            "started_at": None, "finished_at": None,
+        }
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._holds_browser = False
+
+    # --- настройки -------------------------------------------------------- #
+    def config(self):
+        from src.outreach.sender import SenderConfig
+        return SenderConfig.load(self.CONFIG_FILE)
+
+    def settings(self) -> dict:
+        import dataclasses
+        return dataclasses.asdict(self.config())
+
+    def save_settings(self, data: dict) -> dict:
+        import dataclasses
+        config = self.config()
+        for key, value in (data or {}).items():
+            if not hasattr(config, key):
+                continue
+            current = getattr(config, key)
+            try:
+                if isinstance(current, bool):
+                    setattr(config, key, bool(value))
+                elif isinstance(current, int):
+                    setattr(config, key, int(value))
+                elif isinstance(current, float):
+                    setattr(config, key, float(value))
+                else:
+                    setattr(config, key, str(value))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Неверное значение для {key}: {value}") from exc
+        config.save(self.CONFIG_FILE)
+        return dataclasses.asdict(config)
+
+    def template(self):
+        from src.outreach.templates import TemplateError, list_templates, load_template
+        paths = list_templates(self.TEMPLATES_DIR)
+        if not paths:
+            return None, "в outreach_data/templates нет ни одного шаблона"
+        try:
+            return load_template(paths[0]), ""
+        except TemplateError as exc:
+            return None, str(exc).split("\n")[0]
+
+    # --- проверка готовности ---------------------------------------------- #
+    def preflight(self) -> dict:
+        from src.outreach.sender import preflight
+        template, error = self.template()
+        result = preflight(self.config(), template, self.DATA_DIR, store=CRUD.store())
+        if error:
+            result["template_error"] = error
+        result["template_name"] = getattr(template, "name", "")
+        return result
+
+    # --- запуск ------------------------------------------------------------ #
+    def start(self, dry_run: Optional[bool] = None) -> None:
+        with self._lock:
+            if self.state["running"]:
+                raise ValueError("Отправка уже идёт")
+
+            config = self.config()
+            if dry_run is not None:
+                config.dry_run = bool(dry_run)
+            template, error = self.template()
+            if template is None:
+                raise ValueError(error or "не найден шаблон сообщения")
+
+            from src.outreach.templates import TemplateError
+            try:
+                template.validate()
+            except TemplateError as exc:
+                raise ValueError(str(exc).split("\n")[0]) from exc
+
+            # Заготовку не отправляем даже по прямой команде — проверка живёт
+            # здесь, а не только в разборе аргументов CLI
+            if template.is_placeholder() and not config.dry_run:
+                raise ValueError(
+                    "В шаблоне осталась метка «ЗАМЕНИТЕ ЭТОТ ТЕКСТ» — "
+                    "напишите свой текст или включите предпросмотр"
+                )
+
+            if not config.dry_run:
+                report = self.preflight()
+                if not report["ready"]:
+                    titles = [c["title"] for c in report["checks"]
+                              if c["blocking"] and not c["ok"]]
+                    raise ValueError("Не готово к отправке: " + ", ".join(titles))
+                if not BROWSER_LOCK.acquire(blocking=False):
+                    raise ValueError("Браузер занят другой задачей — дождитесь её завершения")
+                self._holds_browser = True
+
+            self._stop.clear()
+            self.state.update({
+                "running": True, "phase": "Запуск", "sent": 0, "failed": 0,
+                "error": "", "dry_run": config.dry_run, "last_event": {},
+                "started_at": time.time(), "finished_at": None,
+            })
+
+        self._thread = threading.Thread(
+            target=self._run, args=(config, template), daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Просит отправку остановиться. Реально работает: цикл проверяет флаг
+        каждую секунду, а не раз в пять минут."""
+        self._stop.set()
+        self.state["phase"] = "Останавливаю…"
+        HUB.publish({"type": "log", "line": "Запрошена остановка отправки…"})
+        HUB.publish({"type": "send", **self.state})
+
+    def _release_browser(self) -> None:
+        if self._holds_browser:
+            try:
+                BROWSER_LOCK.release()
+            except RuntimeError:
+                pass
+            self._holds_browser = False
+
+    def _run(self, config, template) -> None:
+        from src.outreach.sender import run_queue
+
+        def log(message: str) -> None:
+            HUB.publish({"type": "log", "line": message})
+
+        def event(payload: dict) -> None:
+            kind = payload.get("kind", "")
+            if kind == "sent":
+                self.state["sent"] = payload.get("total", self.state["sent"])
+                self.state["phase"] = f"Отправлено: {payload.get('shop', '')}"
+            elif kind == "failed":
+                self.state["failed"] += 1
+                self.state["phase"] = f"Ошибка: {payload.get('shop', '')}"
+            elif kind == "sending":
+                self.state["phase"] = f"Пишу: {payload.get('shop', '')}"
+            elif kind == "waiting":
+                self.state["phase"] = f"Пауза: {payload.get('reason', '')}"
+            self.state["last_event"] = payload
+            HUB.publish({"type": "send", **self.state})
+
+        try:
+            report = run_queue(
+                queue=CRUD.store(),
+                template=template,
+                config=config,
+                data_dir=self.DATA_DIR,
+                on_progress=log,
+                stop_event=self._stop,
+                on_event=event,
+            )
+            self._release_browser()
+            self.state.update({
+                "running": False, "phase": "Готово",
+                "sent": report.get("sent", self.state["sent"]),
+                "failed": report.get("failed", self.state["failed"]),
+                "stopped_reason": report.get("stopped_reason", ""),
+                "finished_at": time.time(),
+            })
+            log(f"Отправка завершена: отправлено {self.state['sent']}, ошибок {self.state['failed']}"
+                + (f" ({self.state['stopped_reason']})" if self.state.get("stopped_reason") else ""))
+            HUB.publish({"type": "send", **self.state})
+            HUB.publish({"type": "send_done", "stats": self.state})
+        except Exception as exc:                             # noqa: BLE001
+            logging.getLogger(__name__).exception("Отправка не удалась")
+            self._release_browser()
+            self.state.update({
+                "running": False, "phase": "Ошибка", "error": str(exc)[:400],
+                "finished_at": time.time(),
+            })
+            log(f"Ошибка отправки: {exc}")
+            HUB.publish({"type": "send", **self.state})
+            HUB.publish({"type": "send_done", "stats": self.state, "error": str(exc)[:400]})
+
+    def status(self) -> dict:
+        return dict(self.state)
+
+
+SEND = SendRunner()
+
+
 # --------------------------------------------------------------------------- #
 #  Шина событий: лог и статус уходят подписчикам SSE
 # --------------------------------------------------------------------------- #
@@ -961,6 +1160,16 @@ class Handler(BaseHTTPRequestHandler):
                 **HARVEST.status(),
                 "default_url": CHINA_SECTION_URL,
             })
+        if path == "/api/send":
+            return self._send_json({
+                "state": SEND.status(),
+                "preflight": SEND.preflight(),
+                "settings": SEND.settings(),
+            })
+        if path == "/api/seller/history":
+            seller_id = self._query().get("seller_id", "")
+            rows = CRUD.store().message_history(seller_id)
+            return self._send_json({"rows": [dict(r) for r in rows]})
         if path == "/api/status":
             return self._send_json({**SERVICE.status(), "harvest": HARVEST.status()})
         if path == "/api/results":
@@ -1070,6 +1279,46 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/harvest/stop":
             HARVEST.stop()
             return self._send_json({"ok": True})
+
+        if path == "/api/send":
+            try:
+                SEND.start(dry_run=data.get("dry_run"))
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+            except Exception as exc:                      # noqa: BLE001
+                return self._send_json({"error": f"Ошибка запуска: {exc}"}, 500)
+            return self._send_json({"ok": True})
+
+        if path == "/api/send/stop":
+            SEND.stop()
+            return self._send_json({"ok": True})
+
+        if path == "/api/send/stopfile":
+            active = bool(data.get("active"))
+            path_file = SEND.DATA_DIR / SEND.config().stop_file
+            try:
+                SEND.DATA_DIR.mkdir(parents=True, exist_ok=True)
+                if active:
+                    path_file.write_text(
+                        f"Остановлено из дашборда {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
+                        encoding="utf-8",
+                    )
+                elif path_file.exists():
+                    path_file.unlink()
+            except OSError as exc:
+                return self._send_json({"error": f"Не удалось: {exc}"}, 500)
+            return self._send_json({"ok": True, "active": path_file.exists()})
+
+        if path == "/api/send/settings":
+            try:
+                return self._send_json({"settings": SEND.save_settings(data)})
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+
+        if path == "/api/sellers/requeue":
+            ids = data.get("seller_ids") or []
+            count = CRUD.store().requeue_failed([str(x) for x in ids] or None)
+            return self._send_json({"requeued": count})
 
         if path == "/api/start":
             try:

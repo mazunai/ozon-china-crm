@@ -128,6 +128,7 @@
   <button class="tab active" data-view="sellers">Продавцы <span class="badge" id="tabCountSellers"></span></button>
   <button class="tab" data-view="rejected">Отсеянные <span class="badge" id="tabCountRejected"></span></button>
   <button class="tab" data-view="harvest">Сбор</button>
+  <button class="tab" data-view="send">Рассылка <span class="badge" id="tabCountSend"></span></button>
 </nav>
 
 <main>
@@ -229,6 +230,66 @@
     </div>
   </section>
 
+  <section class="view" id="view-send">
+    <div class="card">
+      <div class="row">
+        <h2 style="margin:0">Готовность к отправке</h2>
+        <span class="spacer"></span>
+        <span class="pill" id="sendPill">—</span>
+        <button class="ghost" id="btnSendRefresh">Перепроверить</button>
+      </div>
+      <div id="sendChecks" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card">
+      <h2>Ограничители</h2>
+      <div class="row">
+        <label class="check">интервал, мин <input type="number" id="sInterval" min="1" max="1440"></label>
+        <label class="check">разброс, мин <input type="number" id="sJitter" min="0" max="120"></label>
+        <label class="check">лимит в сутки <input type="number" id="sCap" min="1" max="200"></label>
+        <label class="check">с <input type="text" id="sWindowStart" style="min-width:70px;width:70px"></label>
+        <label class="check">до <input type="text" id="sWindowEnd" style="min-width:70px;width:70px"></label>
+      </div>
+      <div class="row">
+        <button class="ghost" id="btnSaveSettings">Сохранить настройки</button>
+        <span class="spacer"></span>
+        <span class="muted" id="sendLimitInfo">—</span>
+      </div>
+      <div class="muted" style="margin-top:8px">
+        Лимит считается по фактически отправленным сообщениям за сегодняшний день
+        (по местному времени). Отметки статусов и заметки в него не входят.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Запуск</h2>
+      <div class="row">
+        <button class="primary" id="btnSendPreview">Предпросмотр</button>
+        <button class="primary" id="btnSendLive">Отправить по-настоящему</button>
+        <button class="ghost" id="btnSendStop" disabled>Остановить</button>
+        <span class="spacer"></span>
+        <span class="muted" id="sendPhase">—</span>
+      </div>
+      <div class="muted" style="margin-top:8px" id="sendMeta">
+        Предпросмотр показывает текст и ничего не меняет в базе. Реальная отправка
+        идёт с паузами, в рабочем окне и с дневным лимитом.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Стоп-кран</h2>
+      <div class="row">
+        <button class="ghost" id="btnStopFileOn">Поставить стоп-кран</button>
+        <button class="ghost" id="btnStopFileOff">Снять стоп-кран</button>
+        <span class="muted" id="stopFileInfo">—</span>
+      </div>
+      <div class="muted" style="margin-top:8px">
+        Стоп-кран останавливает отправку в любой момент, даже запущенную не из
+        дашборда. Отправка проверяет его каждую секунду.
+      </div>
+    </div>
+  </section>
+
   <section class="view" id="view-harvest">
     <div class="card">
       <h2>Сбор китайских продавцов</h2>
@@ -319,6 +380,7 @@
       v.classList.toggle("active", v.id === "view-" + name);
     });
     if (name === "sellers" || name === "rejected") { loadTable(name); }
+    if (name === "send") { loadSend(); }
   }
   document.querySelectorAll(".tab").forEach(function(t){
     t.addEventListener("click", function(){ showView(t.dataset.view); });
@@ -667,6 +729,7 @@
           html += '<div class="muted" style="margin-top:12px">Последнее отправленное сообщение</div>' +
             '<div class="reasons">' + esc(d.message_sent) + "</div>";
         }
+        html += '<div id="historyBox" style="margin-top:14px"></div>';
         html += '<div class="row" style="margin-top:16px">' +
           '<a href="' + esc(profile) + '" target="_blank" rel="noopener">Профиль на Ozon ↗</a>' +
           (d.sample_product_url ? ' · <a href="' + esc(d.sample_product_url) +
@@ -676,6 +739,30 @@
         $("drawer").classList.add("open");
         $("overlay").classList.add("open");
         $("drawerClose").addEventListener("click", closeDrawer);
+
+        // История переписки: в sellers хранится только последнее сообщение,
+        // а журнал знает все попытки
+        fetch("/api/seller/history?seller_id=" + encodeURIComponent(sellerId))
+          .then(function(r){ return r.json(); })
+          .then(function(h){
+            var rows = h.rows || [];
+            var box = $("historyBox");
+            if (!box) { return; }
+            if (!rows.length) {
+              box.innerHTML = '<div class="muted">Отправок не было</div>';
+              return;
+            }
+            box.innerHTML = '<div class="muted">История отправок (' + rows.length + ")</div>" +
+              rows.map(function(m){
+                var mark = m.result === "sent" ? "отправлено" : "ошибка";
+                var color = m.result === "sent" ? "var(--ok)" : "var(--err)";
+                return '<div class="reasons" style="margin-top:6px">' +
+                  '<span style="color:' + color + '">' + mark + "</span> · " +
+                  esc(fmtDate(m.sent_at)) +
+                  (m.error ? ' <span style="color:var(--err)">' + esc(m.error) + "</span>" : "") +
+                  '<div style="margin-top:4px;color:var(--text)">' + esc(m.text.slice(0, 400)) + "</div></div>";
+              }).join("");
+          }).catch(function(){});
       })
       .catch(function(err){ toast("Не удалось открыть карточку: " + err.message, "err"); });
   }
@@ -740,6 +827,19 @@
       try { ev = JSON.parse(e.data); } catch (err) { return; }
       if (ev.type === "log") { addLog(ev.level, (ev.line || "").trim()); }
       else if (ev.type === "harvest") { applyHarvest(ev); }
+      else if (ev.type === "send") {
+        renderSendState(ev);
+        if (ev.last_event && ev.last_event.kind === "sent") {
+          toast("Отправлено: " + (ev.last_event.shop || ""), "ok");
+        }
+      }
+      else if (ev.type === "send_done") {
+        renderSendState({running:false, phase:"Готово", sent:(ev.stats||{}).sent || 0,
+                         failed:(ev.stats||{}).failed || 0, error:ev.error || ""});
+        if (ev.error) { toast("Отправка не удалась: " + ev.error, "err"); }
+        loadSend();
+        loadTable("sellers");
+      }
       else if (ev.type === "harvest_done") {
         applyHarvest({running:false, progress:100, phase:"Готово", stats:ev.stats || {}, error:ev.error || ""});
         if (ev.error) { toast("Сбор не удался: " + ev.error, "err"); }
@@ -851,6 +951,118 @@
     }).catch(function(err){ toast("Не удалось остановить: " + err.message, "err"); });
   });
 
+  /* ---------- рассылка ---------- */
+  var sendBusy = false;
+
+  function renderPreflight(data){
+    var pf = data.preflight || {};
+    var box = $("sendChecks");
+    var html = "";
+    (pf.checks || []).forEach(function(c){
+      var mark = c.ok ? "✓" : (c.blocking ? "✕" : "!");
+      var color = c.ok ? "var(--ok)" : (c.blocking ? "var(--err)" : "var(--warn)");
+      html += '<div class="row" style="align-items:flex-start;margin-bottom:6px">' +
+        '<span style="color:' + color + ';width:16px">' + mark + "</span>" +
+        '<b style="min-width:170px">' + esc(c.title) + "</b>" +
+        '<span class="muted">' + esc(c.detail) + "</span></div>";
+    });
+    if (pf.template_error) {
+      html += '<div class="muted" style="color:var(--warn);margin-top:8px">' + esc(pf.template_error) + "</div>";
+    }
+    box.innerHTML = html || '<div class="muted">Проверка не выполнялась</div>';
+    $("sendPill").className = "pill " + (pf.ready ? "done" : "err");
+    $("sendPill").textContent = pf.ready ? "Готово" : "Не готово";
+    $("sendLimitInfo").textContent = "отправлено сегодня " + (pf.sent_today || 0) +
+      " из " + (pf.daily_cap || 0);
+  }
+
+  function renderSendState(st){
+    var running = !!(st && st.running);
+    sendBusy = running;
+    $("btnSendPreview").disabled = running;
+    $("btnSendLive").disabled = running;
+    $("btnSendStop").disabled = !running;
+    $("sendPhase").textContent = (st && st.phase) || "—";
+    if (st && st.error) {
+      $("sendMeta").innerHTML = '<span style="color:var(--err)">' + esc(st.error) + "</span>";
+    } else if (st && (st.sent || st.failed)) {
+      $("sendMeta").textContent = "Отправлено " + st.sent + ", ошибок " + st.failed +
+        (st.stopped_reason ? " — " + st.stopped_reason : "");
+    }
+    if (running) {
+      $("statusPill").className = "pill run";
+      $("statusPill").textContent = "Идёт отправка";
+    }
+  }
+
+  function loadSend(){
+    fetch("/api/send").then(function(r){ return r.json(); }).then(function(d){
+      if (d.error) { throw new Error(d.error); }
+      renderPreflight(d);
+      renderSendState(d.state);
+      var s = d.settings || {};
+      $("sInterval").value = s.interval_minutes;
+      $("sJitter").value = s.interval_jitter_minutes;
+      $("sCap").value = s.daily_cap;
+      $("sWindowStart").value = s.window_start;
+      $("sWindowEnd").value = s.window_end;
+      var stopInfo = (d.preflight.checks || []).filter(function(c){ return c.key === "stop"; })[0];
+      $("stopFileInfo").textContent = stopInfo ? stopInfo.detail : "—";
+      return d.preflight;
+    }).then(function(pf){
+      $("tabCountSend").textContent = pf && pf.ready ? "готово" : "";
+    }).catch(function(err){
+      $("sendChecks").innerHTML = '<div class="muted" style="color:var(--err)">Не удалось получить состояние: ' +
+        esc(err.message) + "</div>";
+    });
+  }
+
+  $("btnSendRefresh").addEventListener("click", loadSend);
+  $("btnSaveSettings").addEventListener("click", function(){
+    postJson("/api/send/settings", {
+      interval_minutes: parseInt($("sInterval").value, 10),
+      interval_jitter_minutes: parseInt($("sJitter").value, 10),
+      daily_cap: parseInt($("sCap").value, 10),
+      window_start: $("sWindowStart").value.trim(),
+      window_end: $("sWindowEnd").value.trim()
+    }).then(function(){ toast("Настройки сохранены", "ok"); loadSend(); })
+      .catch(function(err){ toast("Не сохранилось: " + err.message, "err"); });
+  });
+  $("btnSendPreview").addEventListener("click", function(){
+    $("btnSendPreview").disabled = true;
+    postJson("/api/send", {dry_run: true}).then(function(){
+      toast("Предпросмотр запущен — текст в логе", "ok");
+      showView("harvest");
+    }).catch(function(err){
+      $("btnSendPreview").disabled = false;
+      toast("Не удалось: " + err.message, "err");
+    });
+  });
+  $("btnSendLive").addEventListener("click", function(){
+    if (!confirm("Отправить сообщение по-настоящему?\n\n" +
+                 "Проверьте, что шаблон готов, а разметка чата снята.\n" +
+                 "Отправка идёт с паузами и в рабочем окне.")) { return; }
+    postJson("/api/send", {dry_run: false}).then(function(){
+      toast("Отправка запущена", "ok");
+      loadSend();
+    }).catch(function(err){ toast("Не удалось запустить: " + err.message, "err"); });
+  });
+  $("btnSendStop").addEventListener("click", function(){
+    postJson("/api/send/stop", {}).then(function(){
+      toast("Останавливаю…");
+    }).catch(function(err){ toast("Не удалось остановить: " + err.message, "err"); });
+  });
+  $("btnStopFileOn").addEventListener("click", function(){
+    postJson("/api/send/stopfile", {active: true})
+      .then(function(){ toast("Стоп-кран поставлен", "ok"); loadSend(); })
+      .catch(function(err){ toast(err.message, "err"); });
+  });
+  $("btnStopFileOff").addEventListener("click", function(){
+    postJson("/api/send/stopfile", {active: false})
+      .then(function(){ toast("Стоп-кран снят", "ok"); loadSend(); })
+      .catch(function(err){ toast(err.message, "err"); });
+  });
+
   /* ---------- запуск ---------- */
   fetch("/api/harvest").then(function(r){ return r.json(); }).then(function(h){
     if (h.default_url) { $("hUrl").value = h.default_url; }
@@ -860,7 +1072,7 @@
 
   loadSummary();
   var initial = (location.hash || "").replace("#", "");
-  showView(["sellers","rejected","harvest"].indexOf(initial) >= 0 ? initial : "sellers");
+  showView(["sellers","rejected","harvest","send"].indexOf(initial) >= 0 ? initial : "sellers");
   connect();
   setInterval(loadSummary, 60000);
 })();

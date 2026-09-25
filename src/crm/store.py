@@ -78,7 +78,27 @@ CRM_COLUMNS = {
     "last_seen_at": "TEXT NOT NULL DEFAULT ''",
     "product_count": "INTEGER NOT NULL DEFAULT 0",
     "chinese_reasons": "TEXT NOT NULL DEFAULT ''",
+    # Когда сообщение РЕАЛЬНО ушло. Нужна отдельно от updated_at: тот меняется
+    # от любой правки (заметка, смена статуса), и дневной лимит считался по
+    # нему — отметка «ответил» съедала лимит и сокращала отправки.
+    "sent_at": "TEXT NOT NULL DEFAULT ''",
 }
+
+# Журнал отправок. В sellers.message_sent хранится только последнее сообщение
+# и оно перезаписывается, поэтому «что писали и что было на прошлой попытке»
+# узнать было нельзя.
+MESSAGES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    seller_id   TEXT NOT NULL,
+    text        TEXT NOT NULL DEFAULT '',
+    sent_at     TEXT NOT NULL,
+    result      TEXT NOT NULL DEFAULT 'sent',
+    error       TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_messages_seller ON messages(seller_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at DESC);
+"""
 
 SCHEMA_TABLE = """
 CREATE TABLE IF NOT EXISTS sellers (
@@ -120,6 +140,12 @@ CREATE INDEX IF NOT EXISTS idx_sellers_status_score ON sellers(status, score DES
 CREATE INDEX IF NOT EXISTS idx_sellers_verified ON sellers(verified_by, score DESC);
 """
 
+# Индекс по sent_at создаём отдельно: на старой базе колонки ещё нет,
+# её добавляет миграция.
+SCHEMA_INDEXES_AFTER_MIGRATION = """
+CREATE INDEX IF NOT EXISTS idx_sellers_sent_at ON sellers(sent_at);
+"""
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -151,7 +177,8 @@ SELECT_FIELDS = (
     "seller_id, shop_name, company_name, uscc, province, registration_kind, address, "
     "orders, reviews, months_on_ozon, rating, score, is_chinese, verified_by, "
     "seller_profile_url, sample_product_url, status, notes, attempts, last_attempt_at, "
-    "last_error, message_sent, first_seen_at, last_seen_at, product_count, chinese_reasons"
+    "last_error, message_sent, first_seen_at, last_seen_at, product_count, chinese_reasons, "
+    "sent_at"
 )
 
 
@@ -191,6 +218,8 @@ class SellerStore:
             # на базе старой очереди колонки verified_by ещё нет.
             self._migrate(conn)
             conn.executescript(SCHEMA_INDEXES)
+            conn.executescript(SCHEMA_INDEXES_AFTER_MIGRATION)
+            conn.executescript(MESSAGES_SCHEMA)
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -529,13 +558,61 @@ class SellerStore:
             ).fetchone()
 
     def mark_sent(self, seller_id: str, message: str) -> None:
+        now = _now()
         with self._connect() as conn:
             conn.execute(
                 "UPDATE sellers SET status = ?, message_sent = ?, last_error = '', "
-                "updated_at = ? WHERE seller_id = ?",
-                (STATUS_SENT, message, _now(), seller_id),
+                "sent_at = ?, updated_at = ? WHERE seller_id = ?",
+                (STATUS_SENT, message, now, now, seller_id),
+            )
+            conn.execute(
+                "INSERT INTO messages (seller_id, text, sent_at, result) VALUES (?, ?, ?, 'sent')",
+                (seller_id, message, now),
             )
         logger.info(f"Отправлено: {seller_id}")
+
+    def log_message(self, seller_id: str, text: str, result: str, error: str = "") -> None:
+        """Записывает попытку в журнал, не меняя статус продавца."""
+        import json as _json
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO messages (seller_id, text, sent_at, result, error) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (seller_id, text, _now(), result, _json.dumps(error[:300], ensure_ascii=False)[1:-1]),
+            )
+
+    def message_history(self, seller_id: str, limit: int = 50) -> List[sqlite3.Row]:
+        """История переписки с продавцом, свежие сверху."""
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT text, sent_at, result, error FROM messages "
+                "WHERE seller_id = ? ORDER BY sent_at DESC, id DESC LIMIT ?",
+                (seller_id, limit),
+            ).fetchall()
+
+    def requeue_failed(self, seller_ids: Optional[Sequence[str]] = None) -> int:
+        """Возвращает в очередь тех, у кого была ошибка.
+
+        Раньше статус «ошибка» был тупиковым: ничего не возвращало продавца
+        в очередь, и повтор был невозможен без ручной правки.
+        """
+        with self._connect() as conn:
+            if seller_ids:
+                placeholders = ",".join("?" * len(seller_ids))
+                cur = conn.execute(
+                    f"UPDATE sellers SET status = ?, updated_at = ? "
+                    f"WHERE status IN (?, ?) AND seller_id IN ({placeholders})",
+                    [STATUS_NEW, _now(), STATUS_FAILED, STATUS_SKIPPED, *seller_ids],
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE sellers SET status = ?, updated_at = ? WHERE status IN (?, ?)",
+                    (STATUS_NEW, _now(), STATUS_FAILED, STATUS_SKIPPED),
+                )
+            count = cur.rowcount
+        if count:
+            logger.info(f"Возвращено в очередь: {count}")
+        return count
 
     def mark_failed(self, seller_id: str, error: str, retryable: bool = True) -> None:
         with self._connect() as conn:
@@ -583,15 +660,50 @@ class SellerStore:
         return bool(row) and row["status"] == STATUS_OPTED_OUT
 
     def sent_since(self, since: datetime) -> int:
+        """Сколько сообщений реально ушло с указанного момента.
+
+        Считаем по messages, а не по sellers: в sellers хранится только
+        последнее сообщение и статус, который меняется вручную. И по sent_at,
+        а не по updated_at — тот обновляется от любой правки, и отметка
+        «ответил» съедала дневной лимит.
+        """
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) AS n FROM sellers WHERE status IN (?, ?) AND updated_at >= ?",
-                (STATUS_SENT, STATUS_REPLIED, since.isoformat(timespec="seconds")),
+                "SELECT COUNT(*) AS n FROM messages WHERE result = 'sent' AND sent_at >= ?",
+                (since.isoformat(timespec="seconds"),),
             ).fetchone()
         return int(row["n"]) if row else 0
 
+    def sent_today(self) -> int:
+        """Отправлено за сегодня по ЛОКАЛЬНОМУ времени.
+
+        Граница суток берётся местная, а не UTC: для Москвы UTC-сутки
+        сдвинуты на 3 часа, и лимит «за сутки» считался бы неверно.
+        """
+        start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        start_utc = start.astimezone(timezone.utc)
+        return self.sent_since(start_utc)
+
     def sent_last_24h(self) -> int:
         return self.sent_since(datetime.now(timezone.utc) - timedelta(hours=24))
+
+    def queue_health(self) -> dict:
+        """Сколько готово к отправке и сколько требует внимания."""
+        with self._connect() as conn:
+            ready = int(conn.execute(
+                "SELECT COUNT(*) c FROM sellers WHERE status = ? "
+                "AND verified_by IN (?, ?) AND sample_product_url != ''",
+                (STATUS_NEW, VERIFY_USCC, VERIFY_WAREHOUSE),
+            ).fetchone()["c"])
+            failed = int(conn.execute(
+                "SELECT COUNT(*) c FROM sellers WHERE status = ?", (STATUS_FAILED,)
+            ).fetchone()["c"])
+            no_product = int(conn.execute(
+                "SELECT COUNT(*) c FROM sellers WHERE status = ? "
+                "AND verified_by IN (?, ?) AND sample_product_url = ''",
+                (STATUS_NEW, VERIFY_USCC, VERIFY_WAREHOUSE),
+            ).fetchone()["c"])
+        return {"ready": ready, "failed": failed, "no_product": no_product}
 
     def iter_sellers(self, status: Optional[str] = None) -> List[sqlite3.Row]:
         with self._connect() as conn:

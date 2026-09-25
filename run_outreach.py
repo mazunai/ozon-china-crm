@@ -3,7 +3,7 @@
 """
 Рассылка китайским продавцам Ozon — точка входа.
 
-    python run_outreach.py import            # загрузить продавцов из output/ в очередь
+    python run_outreach.py check             # проверить готовность к отправке
     python run_outreach.py score --top 30    # показать оценку, лучшие — в конце
     python run_outreach.py preview           # показать готовый текст сообщения
     python run_outreach.py inspect --limit 1 # снять разметку чата (один раз)
@@ -28,7 +28,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.config.settings import Settings
 from src.outreach.inspect_chat import inspect_chat
-from src.outreach.queue_db import OutreachQueue
+from src.crm.store import SellerStore
+from src.outreach.sender import preflight as send_preflight
 from src.outreach.scoring import (
     DEFAULT_WEIGHTS,
     ScoreWeights,
@@ -50,9 +51,13 @@ from src.utils.logger import setup_logging
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Settings.BASE_DIR / "outreach_data"
-QUEUE_DB = DATA_DIR / "queue.sqlite3"
 TEMPLATES_DIR = DATA_DIR / "templates"
 CONFIG_FILE = DATA_DIR / "sender.json"
+# Отправляем из ОБЩЕЙ базы продавцов. Раньше здесь был outreach_data/queue.sqlite3,
+# который создавался только командой `import` — а в дашборде и CRM данные жили в
+# data/sellers.sqlite3. То есть отправка смотрела в пустой файл, и слать было
+# физически некому.
+DB_PATH = Settings.BASE_DIR / "data" / "sellers.sqlite3"
 
 
 # --- Импорт из результатов парсера ---------------------------------------
@@ -107,20 +112,6 @@ def collect_sellers(output_dir: Path) -> List[SellerMetrics]:
 # --- Команды --------------------------------------------------------------
 
 
-def cmd_import(args) -> int:
-    sellers = collect_sellers(Path(args.output_dir))
-    if not sellers:
-        print(f"В {args.output_dir} не найдено продавцов. Сначала запустите парсер.")
-        return 1
-
-    chinese = [s for s in sellers if s.is_chinese]
-    print(f"Всего продавцов: {len(sellers)}, из них китайских: {len(chinese)}")
-
-    queue = OutreachQueue(QUEUE_DB)
-    added = queue.add_sellers(chinese)
-    print(f"Добавлено новых: {added}. Очередь: {queue.stats().as_text()}")
-    return 0
-
 
 def cmd_score(args) -> int:
     sellers = collect_sellers(Path(args.output_dir))
@@ -156,13 +147,13 @@ def cmd_preview(args) -> int:
         return 1
 
     template = load_template(Path(args.template) if args.template else paths[0])
-    queue = OutreachQueue(QUEUE_DB)
+    queue = SellerStore(DB_PATH)
     print(preview(template, queue, seller_id=args.seller))
     return 0
 
 
 def cmd_inspect(args) -> int:
-    queue = OutreachQueue(QUEUE_DB)
+    queue = SellerStore(DB_PATH)
     rows = [r for r in queue.iter_sellers() if r["sample_product_url"]]
     if not rows:
         print("В очереди нет продавцов с ссылкой на товар. Сначала выполните: import")
@@ -183,6 +174,31 @@ def cmd_inspect(args) -> int:
     print("\nПроверьте outreach_data/selectors.proposed.json глазами, затем скопируйте")
     print("нужные значения в outreach_data/selectors.json — отправщик читает только его.")
     return 0
+
+
+def cmd_check(args) -> int:
+    """Показывает, всё ли готово к отправке. Ничего не отправляет."""
+    config = SenderConfig.load(CONFIG_FILE)
+    paths = list_templates(TEMPLATES_DIR)
+    template = None
+    if paths:
+        try:
+            template = load_template(paths[0])
+        except TemplateError as exc:
+            print(f"Шаблон не готов: {exc}")
+    if template is None and not paths:
+        print(f"Шаблонов нет в {TEMPLATES_DIR}")
+        print("Скопируйте заготовку: cp outreach_data/templates/example.txt.example "
+              "outreach_data/templates/main.txt")
+
+    report = send_preflight(config, template, DATA_DIR, store=SellerStore(DB_PATH))
+    print(f"Готовность: {'ГОТОВО' if report['ready'] else 'НЕ ГОТОВО'}")
+    print(f"Режим: {'предпросмотр (не отправляем)' if config.dry_run else 'РЕАЛЬНАЯ ОТПРАВКА'}")
+    print()
+    for check in report["checks"]:
+        mark = "OK " if check["ok"] else ("БЛОК" if check["blocking"] else "нет")
+        print(f"  [{mark}] {check['title']}: {check['detail']}")
+    return 0 if report["ready"] else 1
 
 
 def cmd_send(args) -> int:
@@ -215,7 +231,7 @@ def cmd_send(args) -> int:
     print(f"Дневной лимит: {config.daily_cap}, окно: {config.window_start}–{config.window_end}")
     print(f"Режим: {'ПРЕДПРОСМОТР (не отправляем)' if config.dry_run else 'РЕАЛЬНАЯ ОТПРАВКА'}")
 
-    queue = OutreachQueue(QUEUE_DB)
+    queue = SellerStore(DB_PATH)
     print(f"Очередь: {queue.stats().as_text()}\n")
 
     report = run_queue(
@@ -233,7 +249,7 @@ def cmd_send(args) -> int:
 
 
 def cmd_stats(args) -> int:
-    queue = OutreachQueue(QUEUE_DB)
+    queue = SellerStore(DB_PATH)
     print(queue.stats().as_text())
     if args.list:
         for row in queue.iter_sellers(status=args.status):
@@ -245,7 +261,7 @@ def cmd_stats(args) -> int:
 
 
 def cmd_optout(args) -> int:
-    queue = OutreachQueue(QUEUE_DB)
+    queue = SellerStore(DB_PATH)
     queue.mark_opted_out(args.seller_id)
     print(f"{args.seller_id} добавлен в стоп-лист и больше не получит сообщений.")
     return 0
@@ -264,10 +280,6 @@ def build_parser() -> argparse.ArgumentParser:
             help="каталог с результатами парсера (по умолчанию output/)",
         )
 
-    p_import = sub.add_parser("import", help="загрузить продавцов из output/ в очередь")
-    add_output_dir(p_import)
-    p_import.set_defaults(func=cmd_import)
-
     p_score = sub.add_parser("score", help="показать оценку продавцов")
     add_output_dir(p_score)
     p_score.add_argument("--top", type=int, default=30, help="сколько строк показать")
@@ -283,6 +295,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_inspect = sub.add_parser("inspect", help="снять разметку чата Ozon (один раз)")
     p_inspect.set_defaults(func=cmd_inspect)
+
+    p_check = sub.add_parser("check", help="проверить готовность к отправке")
+    p_check.set_defaults(func=cmd_check)
 
     p_send = sub.add_parser("send", help="запустить рассылку")
     p_send.add_argument("--template", help="путь к шаблону")

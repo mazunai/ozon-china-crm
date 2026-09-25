@@ -218,19 +218,11 @@ class SellersApi:
         """Сводка для шапки: сколько чего, когда собирали, когда бэкап."""
         return self.store().recent_stats()
 
-    def sellers_meta(self) -> dict:
-        """Справочники для интерфейса: статусы и уровни достоверности."""
-        from src.crm.store import STATUS_LABELS, VERIFY_LABELS
-        return {"status_labels": STATUS_LABELS, "verify_labels": VERIFY_LABELS}
-
     def set_note(self, seller_id: str, note: str) -> dict:
         return {"ok": self.store().set_note(seller_id, note)}
 
     def set_status(self, seller_id: str, status: str) -> dict:
         return {"ok": self.store().set_status(seller_id, status)}
-
-    def stats(self) -> dict:
-        return self.store().stats().as_text()
 
 
 # Задержка между запросами по умолчанию — как в харвестере
@@ -1136,8 +1128,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
         if path == "/api/sellers":
             return self._send_json(CRUD.sellers(self._query()))
-        if path == "/api/sellers/meta":
-            return self._send_json(CRUD.sellers_meta())
         if path == "/api/summary":
             return self._send_json(CRUD.summary())
         if path == "/api/seller/detail":

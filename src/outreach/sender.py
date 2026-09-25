@@ -147,13 +147,17 @@ def should_send_now(
             retry_in_seconds=3600,
         )
 
-    start, end = parse_window(config.window_start, config.window_end)
-    if not in_window(now.time(), start, end):
-        return SendDecision(
-            False,
-            f"вне рабочего окна {config.window_start}–{config.window_end}",
-            retry_in_seconds=600,
-        )
+    # Рабочее окно ограничивает только реальную отправку. Предпросмотр ничего
+    # не отправляет и должен показывать текст в любое время суток — иначе
+    # вечером он встаёт в бесконечное ожидание до утра.
+    if not config.dry_run:
+        start, end = parse_window(config.window_start, config.window_end)
+        if not in_window(now.time(), start, end):
+            return SendDecision(
+                False,
+                f"вне рабочего окна {config.window_start}–{config.window_end}",
+                retry_in_seconds=600,
+            )
 
     if next_allowed_at and now < next_allowed_at:
         wait = int((next_allowed_at - now).total_seconds())
@@ -380,6 +384,50 @@ def preflight(config: SenderConfig, template, data_dir: Path, store=None,
     }
 
 
+def login_flow(data_dir: Path, timeout_seconds: int = 300, on_progress=None) -> bool:
+    """Открывает Chrome с профилем парсера, чтобы вы вошли в Ozon.
+
+    Профиль парсера (`~/.ozon_parser_chrome`) отдельный от вашего обычного
+    браузера: сессия из него не переносится. Поэтому вход нужно сделать один
+    раз именно в этом окне — дальше cookies сохранятся и отправка будет
+    работать без входа.
+
+    Функция ждёт, пока вход действительно произойдёт, и только потом отдаёт
+    управление: иначе отправка упала бы на первом же продавце.
+    """
+    from ..utils.selenium_manager import SeleniumManager
+
+    def say(message: str) -> None:
+        logger.info(message)
+        if on_progress:
+            on_progress(message)
+
+    manager = SeleniumManager(headless=False)
+    driver = manager.create_driver()
+    try:
+        driver.get("https://www.ozon.ru/")
+        say("Открыл Ozon в профиле парсера. Войдите в аккаунт в этом окне.")
+
+        selectors_path = data_dir / "selectors.json"
+        selectors = ChatSelectors.load(selectors_path)
+        client = ChatClient(driver, selectors, manager=manager)
+
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            if client.is_logged_in():
+                say("Вход выполнен — сессия сохранена в профиле парсера.")
+                return True
+            time.sleep(3)
+
+        say(f"Вход не выполнен за {timeout_seconds} секунд.")
+        return False
+    finally:
+        try:
+            manager.close()
+        except Exception:                                    # noqa: BLE001
+            pass
+
+
 def build_driver(headless: bool = False):
     """Драйвер с постоянным профилем — в нём живёт ваша сессия Ozon.
 
@@ -420,6 +468,7 @@ def run_queue(
     now_fn: Callable[[], datetime] = datetime.now,
     stop_event=None,
     on_event: Optional[Callable[[dict], None]] = None,
+    limit: Optional[int] = None,
 ) -> dict:
     """Прогоняет очередь с соблюдением ограничителей.
 
@@ -528,6 +577,13 @@ def run_queue(
             row = queue.claim_next()
             if not row:
                 report["stopped_reason"] = "очередь пуста"
+                progress(report["stopped_reason"])
+                break
+
+            # Ограничение прогона: удобно для проверки на нескольких
+            # продавцах, не дожидаясь дневного лимита
+            if limit is not None and report["sent"] >= limit:
+                report["stopped_reason"] = f"достигнут предел прогона: {limit}"
                 progress(report["stopped_reason"])
                 break
 

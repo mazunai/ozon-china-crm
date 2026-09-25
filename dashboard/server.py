@@ -493,7 +493,7 @@ class SendRunner:
         return result
 
     # --- запуск ------------------------------------------------------------ #
-    def start(self, dry_run: Optional[bool] = None) -> None:
+    def start(self, dry_run: Optional[bool] = None, limit: Optional[int] = None) -> None:
         with self._lock:
             if self.state["running"]:
                 raise ValueError("Отправка уже идёт")
@@ -533,11 +533,11 @@ class SendRunner:
             self.state.update({
                 "running": True, "phase": "Запуск", "sent": 0, "failed": 0,
                 "error": "", "dry_run": config.dry_run, "last_event": {},
-                "started_at": time.time(), "finished_at": None,
+                "limit": limit, "started_at": time.time(), "finished_at": None,
             })
 
         self._thread = threading.Thread(
-            target=self._run, args=(config, template), daemon=True
+            target=self._run, args=(config, template, limit), daemon=True
         )
         self._thread.start()
 
@@ -557,7 +557,7 @@ class SendRunner:
                 pass
             self._holds_browser = False
 
-    def _run(self, config, template) -> None:
+    def _run(self, config, template, limit: Optional[int] = None) -> None:
         from src.outreach.sender import run_queue
 
         def log(message: str) -> None:
@@ -587,6 +587,7 @@ class SendRunner:
                 on_progress=log,
                 stop_event=self._stop,
                 on_event=event,
+                limit=limit,
             )
             self._release_browser()
             self.state.update({
@@ -1297,7 +1298,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/send":
             try:
-                SEND.start(dry_run=data.get("dry_run"))
+                limit = data.get("limit")
+                SEND.start(
+                    dry_run=data.get("dry_run"),
+                    limit=int(limit) if limit else None,
+                )
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
             except Exception as exc:                      # noqa: BLE001

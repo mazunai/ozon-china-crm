@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src.config.settings import Settings
 from src.outreach.inspect_chat import inspect_chat
 from src.crm.store import SellerStore
+from src.outreach.sender import login_flow
 from src.outreach.sender import preflight as send_preflight
 from src.outreach.scoring import (
     DEFAULT_WEIGHTS,
@@ -176,6 +177,27 @@ def cmd_inspect(args) -> int:
     return 0
 
 
+def cmd_login(args) -> int:
+    """Открывает Chrome с профилем парсера для входа в Ozon.
+
+    Нужно один раз: профиль парсера отдельный, сессия из обычного браузера в
+    него не переносится. После входа cookies сохранятся, и отправка будет
+    работать без него.
+    """
+    print("Откроется Chrome с профилем парсера.")
+    print("Войдите в Ozon в этом окне — окно само закроется, когда вход пройдёт.\n")
+
+    def say(message: str) -> None:
+        print(f"  {message}")
+
+    ok = login_flow(DATA_DIR, timeout_seconds=args.timeout, on_progress=say)
+    if ok:
+        print("\nПроверьте готовность: python run_outreach.py check")
+        return 0
+    print("\nВход не выполнен. Запустите команду снова и войдите в открывшемся окне.")
+    return 1
+
+
 def cmd_check(args) -> int:
     """Показывает, всё ли готово к отправке. Ничего не отправляет."""
     config = SenderConfig.load(CONFIG_FILE)
@@ -241,6 +263,7 @@ def cmd_send(args) -> int:
         data_dir=DATA_DIR,
         once=args.once,
         on_progress=print,
+        limit=getattr(args, "limit", None),
     )
     print(f"\nИтог: отправлено={report['sent']}, ошибок={report['failed']}")
     if report["stopped_reason"]:
@@ -296,6 +319,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_inspect = sub.add_parser("inspect", help="снять разметку чата Ozon (один раз)")
     p_inspect.set_defaults(func=cmd_inspect)
 
+    p_login = sub.add_parser("login", help="войти в Ozon в профиле парсера")
+    p_login.add_argument("--timeout", type=int, default=300,
+                         help="сколько секунд ждать вход")
+    p_login.set_defaults(func=cmd_login)
+
     p_check = sub.add_parser("check", help="проверить готовность к отправке")
     p_check.set_defaults(func=cmd_check)
 
@@ -306,6 +334,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--dry-run", action="store_true", help="только показать")
     p_send.add_argument("--interval", type=int, help="интервал в минутах")
     p_send.add_argument("--cap", type=int, help="дневной лимит")
+    p_send.add_argument("--limit", type=int,
+                        help="отправить N сообщений и остановиться (для проверки)")
     p_send.set_defaults(func=cmd_send)
 
     p_stats = sub.add_parser("stats", help="состояние очереди")

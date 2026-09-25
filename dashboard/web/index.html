@@ -265,6 +265,12 @@
     <div class="card">
       <h2>Запуск</h2>
       <div class="row">
+        <label class="check">отправить не больше
+          <input type="number" id="sLimit" value="0" min="0" max="500" style="width:72px">
+        </label>
+        <span class="muted">сообщений и остановиться (0 — без ограничения)</span>
+      </div>
+      <div class="row" style="margin-top:10px">
         <button class="primary" id="btnSendPreview">Предпросмотр</button>
         <button class="primary" id="btnSendLive">Отправить по-настоящему</button>
         <button class="ghost" id="btnSendStop" disabled>Остановить</button>
@@ -1074,15 +1080,18 @@
       toast("Не удалось: " + err.message, "err");
     });
   });
-  $("btnSendLive").addEventListener("click", function(){
-    if (!confirm("Отправить сообщение по-настоящему?\n\n" +
-                 "Проверьте, что шаблон готов, а разметка чата снята.\n" +
-                 "Отправка идёт с паузами и в рабочем окне.")) { return; }
-    postJson("/api/send", {dry_run: false}).then(function(){
-      toast("Отправка запущена", "ok");
-      loadSend();
-    }).catch(function(err){ toast("Не удалось запустить: " + err.message, "err"); });
-  });
+    $("btnSendLive").addEventListener("click", function(){
+      var limit = parseInt($("sLimit").value, 10) || 0;
+      var head = limit ? ("Отправить до " + limit + " сообщений?") : "Запустить рассылку?";
+      var warn = "Сообщения уйдут настоящим продавцам. Проверьте, что шаблон готов, " +
+                 "разметка чата снята и вы вошли в Ozon в профиле парсера. " +
+                 "Отправка идёт с паузами и в рабочем окне.";
+      if (!confirm(head + "\n\n" + warn)) { return; }
+      postJson("/api/send", {dry_run: false, limit: limit || null}).then(function(){
+        toast(limit ? ("Запущено, не больше " + limit) : "Отправка запущена", "ok");
+        loadSend();
+      }).catch(function(err){ toast("Не удалось запустить: " + err.message, "err"); });
+    });
   $("btnSendStop").addEventListener("click", function(){
     postJson("/api/send/stop", {}).then(function(){
       toast("Останавливаю…");

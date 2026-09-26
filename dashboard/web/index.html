@@ -9,10 +9,10 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Ozon CRM">
+<meta name="apple-mobile-web-app-title" content="Ozon + WB CRM">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="mobile-web-app-capable" content="yes">
-<title>Ozon CRM — китайские продавцы</title>
+<title>Ozon + WB CRM — китайские продавцы</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   :root{
@@ -59,6 +59,13 @@
     background:linear-gradient(180deg,rgba(59,130,246,.10),transparent)}
   .tab .badge{margin-left:6px;font-size:11px;color:var(--dim)}
   .tab .badge.ok{color:var(--ok)}
+  /* Переключатель маркетплейса: одна CRM, два источника данных */
+  .mp-switch{display:inline-flex;border:1px solid rgba(255,255,255,.12);border-radius:10px;overflow:hidden;margin-left:6px}
+  .mp-btn{padding:6px 14px;border:none;background:transparent;color:var(--dim);
+          font:inherit;font-size:13px;cursor:pointer;min-height:34px}
+  .mp-btn.active{background:linear-gradient(135deg,var(--accent),#4a8cf7);color:#fff;font-weight:600}
+  .mp-btn:hover:not(.active){background:rgba(255,255,255,.06);color:var(--text)}
+  .tab.is-disabled{opacity:.35;pointer-events:none}
   main{padding:18px 20px 60px;max-width:1900px}
   .view{display:none}
   .view.active{display:block;animation:fadeUp .25s ease}
@@ -281,7 +288,11 @@
 
 <header class="top">
   <span class="logo">O</span>
-  <span class="brand">Ozon CRM</span>
+  <span class="brand">Ozon + WB CRM</span>
+  <span class="mp-switch" id="mpSwitch" title="Чьи данные показывать: данные маркетплейсов лежат в отдельных базах">
+    <button class="mp-btn active" data-mp="ozon" type="button">Ozon</button>
+    <button class="mp-btn" data-mp="wb" type="button">WB</button>
+  </span>
   <span class="pill" id="statusPill">Ожидание</span>
   <span class="summary">
     <span>подтверждённых <b id="sumVerified">—</b></span>
@@ -568,6 +579,33 @@
       <div class="log" id="log"><div class="log-empty">Здесь появятся сообщения сбора.</div></div>
     </div>
 
+    <div class="card" id="wbCard">
+      <h2>Сбор Wildberries · отдельный воркер</h2>
+      <div class="row">
+        <input type="text" id="wUrl" placeholder="поисковый запрос, например «органайзер для косметики»" style="flex:1;min-width:340px">
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label class="check">страниц <input type="number" id="wPages" value="10" min="1" max="500"></label>
+        <label class="check">перечитывать известных, дней <input type="number" id="wRefresh" value="7" min="0" max="365"></label>
+        <button class="primary" id="btnWbStart">Собрать</button>
+        <button class="ghost" id="btnWbStop" disabled>Остановить</button>
+        <span class="spacer"></span>
+        <span class="pill" id="wPill">не идёт</span>
+      </div>
+      <div class="bar" style="margin-top:10px"><div class="fill" id="wBar"></div></div>
+      <div class="muted" style="margin-top:8px" id="wMeta">
+        WB-воркер живёт отдельным процессом и работает без браузера: падение или
+        остановка WB не задевает Ozon. Поиск — по 100 товаров на страницу,
+        реквизиты поставщика берутся по supplierId. Продавцы пишутся в отдельную
+        базу WB (переключатель в шапке).
+      </div>
+      <div class="muted" id="wBlocked" style="margin-top:6px;display:none;color:#f87171"></div>
+      <details style="margin-top:8px">
+        <summary class="muted" style="cursor:pointer">Хвост лога WB-воркера</summary>
+        <div class="log" id="wLog" style="height:220px;margin-top:8px"></div>
+      </details>
+    </div>
+
     <div class="card">
       <h2>Ночной сбор · запуск кнопкой</h2>
       <div class="row">
@@ -666,6 +704,33 @@
   var RESULT_COLOR = {sent:"#34d399", error:"#f87171", failed:"#f87171", received:"#a78bfa"};
   var RESULT_TITLE = {received:"ответил"};
 
+  /* ---------- маркетплейс ---------- */
+  // Чьи данные показывать. Базы у маркетплейсов разные, интерфейс один:
+  // переключатель в шапке просто меняет параметр ?marketplace= у всех
+  // запросов к CRM. Рассылка и чаты — пока только Ozon.
+  var MARKETPLACE = "ozon";
+  function mpQ(){
+    return MARKETPLACE === "wb" ? "?marketplace=wb" : "";
+  }
+  function mpA(){
+    return MARKETPLACE === "wb" ? "&marketplace=wb" : "";
+  }
+  function applyMarketplaceUI(){
+    document.querySelectorAll(".mp-btn").forEach(function(b){
+      b.classList.toggle("active", b.dataset.mp === MARKETPLACE);
+    });
+    var sendTab = document.querySelector('.tab[data-view="send"]');
+    if (sendTab) sendTab.classList.toggle("is-disabled", MARKETPLACE === "wb");
+    document.querySelectorAll(".view").forEach(function(v){
+      if (v.classList.contains("active")) {
+        var name = v.id.replace("view-", "");
+        if (name === "sellers" || name === "rejected") { loadTable(name); }
+        if (name === "overview") { loadStats(); }
+      }
+    });
+    loadSummary();
+  }
+
   /* ---------- вкладки ---------- */
   function showView(name){
     document.querySelectorAll(".tab").forEach(function(t){
@@ -679,7 +744,7 @@
     if (name === "sellers" || name === "rejected") { loadTable(name); }
     if (name === "send") { loadSend(); }
     if (name === "overview") { loadStats(); }
-    if (name === "harvest") { loadNight(); }
+    if (name === "harvest") { loadNight(); loadWorker(); }
   }
   document.querySelectorAll(".tab").forEach(function(t){
     t.addEventListener("click", function(){ showView(t.dataset.view); });
@@ -704,6 +769,7 @@
     if (t.tier) p.set("tier", t.tier);
     if (t.statuses.length) p.set("status", t.statuses.join(","));
     if (t.provinces.length) p.set("province", t.provinces.join(","));
+    if (MARKETPLACE === "wb") p.set("marketplace", "wb");
     return p;
   }
 
@@ -946,7 +1012,7 @@
     var value = input.value;
     input.classList.remove("dirty");
     input.classList.add("saving");
-    postJson("/api/seller/note", {seller_id: sellerId, note: value})
+    postJson("/api/seller/note", {seller_id: sellerId, note: value, marketplace: MARKETPLACE})
       .then(function(){
         input.classList.remove("saving");
         if (drafts[sellerId] === value) { delete drafts[sellerId]; }
@@ -1009,7 +1075,7 @@
   document.addEventListener("change", function(ev){
     var sel = closestTo(ev.target, "select.sel-status");
     if (sel) {
-      postJson("/api/seller/status", {seller_id: sel.dataset.seller, status: sel.value})
+      postJson("/api/seller/status", {seller_id: sel.dataset.seller, status: sel.value, marketplace: MARKETPLACE})
         .then(function(){
           toast("Статус: " + (STATUS_LABELS[sel.value] || sel.value), "ok");
           // Перекрашиваем на месте — в списке сразу видно новую отметку.
@@ -1051,7 +1117,7 @@
     if (!ids.length) { return; }
     if (action === "status" && !status) { toast("Выберите статус"); return; }
     Promise.all(ids.map(function(id){
-      return postJson("/api/seller/status", {seller_id: id, status: status || "new"});
+      return postJson("/api/seller/status", {seller_id: id, status: status || "new", marketplace: MARKETPLACE});
     })).then(function(){
       toast((status === "new" ? "Возвращено в очередь: " : "Статус обновлён: ") + ids.length, "ok");
       selected.clear();
@@ -1068,7 +1134,7 @@
 
   /* ---------- карточка продавца ---------- */
   function openDrawer(sellerId){
-    fetch("/api/seller/detail?seller_id=" + encodeURIComponent(sellerId))
+    fetch("/api/seller/detail?seller_id=" + encodeURIComponent(sellerId) + mpA())
       .then(function(r){ return r.json(); })
       .then(function(d){
         if (d.error) { toast(d.error, "err"); return; }
@@ -1142,7 +1208,7 @@
 
         // Стадия сделки: сохраняется сразу при смене
         $("stStage").addEventListener("change", function(){
-          postJson("/api/seller/stage", {seller_id: d.seller_id, stage: this.value})
+          postJson("/api/seller/stage", {seller_id: d.seller_id, stage: this.value, marketplace: MARKETPLACE})
             .then(function(){ toast("Стадия сохранена", "ok"); loadStats(); })
             .catch(function(err){ toast("Не сохранено: " + err.message, "err"); });
         });
@@ -1170,7 +1236,7 @@
 
         // История переписки: в sellers хранится только последнее сообщение,
         // а журнал знает все попытки
-        fetch("/api/seller/history?seller_id=" + encodeURIComponent(sellerId))
+        fetch("/api/seller/history?seller_id=" + encodeURIComponent(sellerId) + mpA())
           .then(function(r){ return r.json(); })
           .then(function(h){
             var rows = h.rows || [];
@@ -1342,6 +1408,86 @@
   });
 
   $("btnNightRefresh").addEventListener("click", function(){ loadNight(); });
+
+  /* ---------- WB-воркер: отдельный процесс, отдельная база ---------- */
+  var workerWasRunning = false;
+
+  function applyWorker(d){
+    var st = d.state || {};
+    var running = !!d.running;
+    $("btnWbStart").disabled = running;
+    $("btnWbStop").disabled = !running;
+
+    var status = st.exit_status;
+    var pillText;
+    if (running) {
+      pillText = st.blocked ? "WB закрыл доступ" : (st.phase || "Работаю");
+    } else if (status === "ok") { pillText = "готово"; }
+    else if (status === "stopped") { pillText = "остановлен"; }
+    else if (status === "error") { pillText = "ошибка"; }
+    else { pillText = "не идёт"; }
+    $("wPill").textContent = pillText;
+
+    var progress = (running && st.total > 0)
+      ? Math.min(100, Math.round((st.done || 0) / st.total * 100)) : (running ? 15 : 0);
+    $("wBar").style.width = progress + "%";
+
+    var meta = running
+      ? ((st.last_log || "") + (st.sellers_added !== undefined
+          ? " · найдено " + (st.sellers_found || 0) + ", добавлено " + (st.sellers_added || 0)
+          : ""))
+      : (st.last_log || "—");
+    $("wMeta").textContent = meta;
+
+    var blockedBox = $("wBlocked");
+    if (st.blocked) {
+      blockedBox.style.display = "";
+      blockedBox.textContent =
+        "Wildberries отвечает 403/челленджем: этому IP нужен прокси. " +
+        "Впишите WB_PROXY в .env (например http://user:pass@host:port) и запустите снова.";
+    } else {
+      blockedBox.style.display = "none";
+    }
+
+    var logBox = $("wLog");
+    logBox.innerHTML = (d.log && d.log.length)
+      ? d.log.map(function(line){ return "<div>" + esc(line) + "</div>"; }).join("")
+      : '<div class="log-empty">Лог WB-воркера появится здесь.</div>';
+    logBox.scrollTop = logBox.scrollHeight;
+
+    if (workerWasRunning && !running && !d.desired) {
+      toast("WB-сбор завершён — база WB обновлена", "ok");
+      loadSummary();
+      if (MARKETPLACE === "wb") { loadTable("sellers"); loadStats(); }
+    }
+    workerWasRunning = running;
+  }
+
+  function loadWorker(){
+    return fetch("/api/worker?marketplace=wb").then(function(r){ return r.json(); })
+      .then(applyWorker).catch(function(){});
+  }
+
+  $("btnWbStart").addEventListener("click", function(){
+    postJson("/api/worker/start", {
+      marketplace: "wb",
+      url: $("wUrl").value.trim(),
+      pages: parseInt($("wPages").value, 10) || 10,
+      refresh_days: parseInt($("wRefresh").value, 10) || 7,
+    }).then(function(){
+      toast("WB-воркер запущен (отдельный процесс)", "ok");
+      setTimeout(loadWorker, 500);
+    }).catch(function(err){
+      toast("Не запустился: " + err.message, "err");
+    });
+  });
+
+  $("btnWbStop").addEventListener("click", function(){
+    postJson("/api/worker/stop", {marketplace: "wb"}).then(function(){
+      toast("Остановка запрошена: воркер доиграет текущий шаг", "ok");
+      loadWorker();
+    }).catch(function(err){ toast("Не удалось: " + err.message, "err"); });
+  });
 
   /* ---------- обзор: цифры и графики ---------- */
   var chartBar = null, chartDonut = null;
@@ -1610,7 +1756,7 @@
   }
 
   function loadStats(){
-    return fetch("/api/stats").then(function(r){ return r.json(); }).then(function(d){
+    return fetch("/api/stats" + mpQ()).then(function(r){ return r.json(); }).then(function(d){
       if (d.error) { return; }
       STATUS_LABELS = d.status_labels || STATUS_LABELS;
       STATS.counts = d.status_counts || {};
@@ -1664,7 +1810,25 @@
     es.onmessage = function(e){
       var ev;
       try { ev = JSON.parse(e.data); } catch (err) { return; }
-      if (ev.type === "log") { addLog(ev.level, (ev.line || "").trim()); }
+      if (ev.type === "log") {
+        // Строки лога WB-воркера приходят с пометкой marketplace и живут
+        // в своей карточке, не перемешиваясь с логом Ozon-сбора.
+        if (ev.marketplace === "wb") {
+          var wbLog = $("wLog");
+          if (wbLog) {
+            var div = document.createElement("div");
+            div.textContent = (ev.line || "").trim();
+            wbLog.appendChild(div);
+            wbLog.scrollTop = wbLog.scrollHeight;
+          }
+        } else {
+          addLog(ev.level, (ev.line || "").trim());
+        }
+      }
+      else if (ev.type === "worker") {
+        loadWorker();
+        if (ev.finished) { loadSummary(); }
+      }
       else if (ev.type === "harvest") { applyHarvest(ev); }
       else if (ev.type === "send") {
         renderSendState(ev);
@@ -1700,7 +1864,7 @@
   }
 
   function loadSummary(){
-    fetch("/api/summary").then(function(r){ return r.json(); }).then(function(d){
+    fetch("/api/summary" + mpQ()).then(function(r){ return r.json(); }).then(function(d){
       if (d.error) { return; }
       SUM = d;
       $("sumVerified").textContent = fmtNum(d.verified);
@@ -1772,7 +1936,7 @@
       "python tools/backup_db.py";
     if (!confirm(question)) { return; }
 
-    postJson("/api/sellers/delete", {seller_ids: ids, allow_verified: true})
+    postJson("/api/sellers/delete", {seller_ids: ids, allow_verified: true, marketplace: MARKETPLACE})
       .then(function(res){
         toast("Удалено: " + (res.deleted || 0), "ok");
         selected.clear();
@@ -1806,7 +1970,7 @@
     if (!confirm("Удалить " + ids.length + " записей с этой страницы?\n\n" +
                  "Отменить это будет нельзя. Совет: сначала снимите копию командой\n" +
                  "python tools/backup_db.py")) { return; }
-    postJson("/api/sellers/purge", {seller_ids: ids}).then(function(res){
+    postJson("/api/sellers/purge", {seller_ids: ids, marketplace: MARKETPLACE}).then(function(res){
       toast("Удалено: " + (res.deleted || 0), "ok");
       selected.clear();
       loadTable("rejected"); loadSummary(); loadStats();
@@ -2064,15 +2228,28 @@
 
   loadSummary();
   loadStats();
+  loadWorker();
   var views = ["overview","sellers","rejected","harvest","send"];
   var initial = (location.hash || "").replace("#", "");
   showView(views.indexOf(initial) >= 0 ? initial : "overview");
   connect();
   setInterval(function(){ loadSummary(); loadStats(); }, 60000);
-  // Пока открыта вкладка «Сбор», следим за ночным сбором чаще
+  // Пока открыта вкладка «Сбор», следим за ночным сбором и WB-воркером
   setInterval(function(){
-    if ($("view-harvest").classList.contains("active")) { loadNight(); }
+    if ($("view-harvest").classList.contains("active")) { loadNight(); loadWorker(); }
   }, 20000);
+
+  /* ---------- переключатель маркетплейса ---------- */
+  document.querySelectorAll(".mp-btn").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      if (btn.dataset.mp === MARKETPLACE) { return; }
+      MARKETPLACE = btn.dataset.mp;
+      applyMarketplaceUI();
+      toast(MARKETPLACE === "wb"
+        ? "Показаны данные Wildberries (отдельная база)"
+        : "Показаны данные Ozon");
+    });
+  });
 })();
 </script>
 </body>

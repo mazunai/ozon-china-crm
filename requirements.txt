@@ -6,3 +6,6 @@ lxml==4.9.3
 openpyxl==3.1.5
 aiogram==3.21.0
 pyinstaller==6.14.2
+# WB-воркер: обычный requests Wildberries закрывает по TLS-отпечатку,
+# curl_cffi притворяется Chrome (проверено 26.09.2026)
+curl-cffi>=0.16

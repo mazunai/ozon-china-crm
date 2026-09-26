@@ -247,6 +247,12 @@ except Exception:                                            # noqa: BLE001
     DEFAULT_DELAY = 0.7
 
 CRUD = SellersApi(DB_PATH)
+# База WB — отдельный файл (решение владельца: данные маркетплейсов не
+# смешиваются). Тот же SellerStore и та же статусная модель, свой файл:
+# задаёшь путь — схема создаётся автоматически, миграций живой базе Ozon
+# не требуется.
+WB_DB_PATH = DATA_DIR / "sellers-wb.sqlite3"
+CRUD_WB = SellersApi(WB_DB_PATH)
 AUTH = load_credentials()
 
 # Сессия дашборда. HTTP Basic не подходит: встроенные браузеры не показывают
@@ -1081,6 +1087,12 @@ class Hub:
 
 HUB = Hub()
 
+# Супервайзер воркеров сбора (Ozon / WB — отдельные процессы). Должен
+# создаваться после HUB: события воркеров уходят в SSE через его шину.
+from workers import WorkerSupervisor                    # noqa: E402
+
+WORKERS = WorkerSupervisor(REPO_ROOT, publish=HUB.publish)
+
 
 # --------------------------------------------------------------------------- #
 #  Оценка прогресса по строкам лога
@@ -1546,6 +1558,18 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         return {key: values[0] for key, values in parse_qs(parsed.query).items() if values}
 
+    def _crm(self, query: dict) -> SellersApi:
+        """CRM выбранного маркетплейса: ?marketplace=wb — база Wildberries.
+
+        Дефолт ozon сохраняет обратную совместимость: старые вызовы UI и
+        скрипты с Basic-авторизацией продолжают работать без параметра.
+        """
+        return CRUD_WB if str(query.get("marketplace", "ozon")) == "wb" else CRUD
+
+    def _crm_for_body(self, data: dict) -> SellersApi:
+        """То же для POST: маркетплейс приходит в теле запроса."""
+        return CRUD_WB if str(data.get("marketplace", "ozon")) == "wb" else CRUD
+
     def _send_json(self, obj, code: int = 200) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -1584,18 +1608,18 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             return self._send_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
         if path == "/api/sellers":
-            return self._send_json(CRUD.sellers(self._query()))
+            return self._send_json(self._crm(self._query()).sellers(self._query()))
         if path == "/api/send/template":
             return self._send_json(SEND.read_template())
         if path == "/api/send/preview-message":
             return self._send_json(SEND.preview_message(self._query().get("seller_id")))
         if path == "/api/summary":
-            return self._send_json(CRUD.summary())
+            return self._send_json(self._crm(self._query()).summary())
         if path == "/api/stats":
             # Сводка для вкладки «Обзор»: статусы продавцов, отправки по дням
             # и лента последних сообщений.
             from src.crm.store import STATUS_LABELS
-            store = CRUD.store()
+            store = self._crm(self._query()).store()
             return self._send_json({
                 "status_counts": store.status_counts(),
                 "sent_by_day": store.sent_by_day(days=15),
@@ -1611,14 +1635,17 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/seller/detail":
             seller_id = self._query().get("seller_id", "")
-            detail = CRUD.detail(seller_id)
+            detail = self._crm(self._query()).detail(seller_id)
             return self._send_json(detail or {"error": "Продавец не найден"},
                                    200 if detail else 404)
         if path == "/api/sellers/export.csv":
-            body = CRUD.export_csv(self._query()).encode("utf-8")
+            marketplace = str(self._query().get("marketplace", "ozon"))
+            body = self._crm(self._query()).export_csv(self._query()).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
-            self.send_header("Content-Disposition", 'attachment; filename="ozon-sellers.csv"')
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{marketplace}-sellers.csv"')
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -1656,8 +1683,19 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/seller/history":
             seller_id = self._query().get("seller_id", "")
-            rows = CRUD.store().message_history(seller_id)
+            rows = self._crm(self._query()).store().message_history(seller_id)
             return self._send_json({"rows": [dict(r) for r in rows]})
+        if path == "/api/worker":
+            # Статус воркера маркетплейса: жив, стейт-файл, хвост лога.
+            marketplace = str(self._query().get("marketplace", "ozon"))
+            payload = WORKERS.status(marketplace)
+            if marketplace == "wb":
+                from src.parsers.wb.harvest import DEFAULT_QUERY as WB_DEFAULT_QUERY
+
+                payload["default_url"] = WB_DEFAULT_QUERY
+            else:
+                payload["default_url"] = CHINA_SECTION_URL
+            return self._send_json(payload)
         if path == "/api/status":
             return self._send_json({**SERVICE.status(), "harvest": HARVEST.status()})
         if path == "/api/results":
@@ -1753,7 +1791,7 @@ class Handler(BaseHTTPRequestHandler):
             seller_id = str(data.get("seller_id", "")).strip()
             if not seller_id:
                 return self._send_json({"error": "Не указан seller_id"}, 400)
-            return self._send_json(CRUD.set_note(seller_id, str(data.get("note", ""))))
+            return self._send_json(self._crm_for_body(data).set_note(seller_id, str(data.get("note", ""))))
 
         if path == "/api/seller/status":
             seller_id = str(data.get("seller_id", "")).strip()
@@ -1761,7 +1799,7 @@ class Handler(BaseHTTPRequestHandler):
             if not seller_id:
                 return self._send_json({"error": "Не указан seller_id"}, 400)
             try:
-                return self._send_json(CRUD.set_status(seller_id, status))
+                return self._send_json(self._crm_for_body(data).set_status(seller_id, status))
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
 
@@ -1770,7 +1808,7 @@ class Handler(BaseHTTPRequestHandler):
             if not seller_id:
                 return self._send_json({"error": "Не указан seller_id"}, 400)
             try:
-                return self._send_json({"ok": CRUD.store().set_stage(seller_id, str(data.get("stage", "")))})
+                return self._send_json({"ok": self._crm_for_body(data).store().set_stage(seller_id, str(data.get("stage", "")))})
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
 
@@ -1778,6 +1816,10 @@ class Handler(BaseHTTPRequestHandler):
             # Ответ из дашборда: открываем чат продавца в общем Chrome и
             # отправляем текст. Синхронно (~20–40 с) — кнопка в интерфейсе
             # крутится, пока не придёт ответ.
+            if str(data.get("marketplace", "ozon")) == "wb":
+                return self._send_json(
+                    {"error": "У Wildberries нет чата с продавцом — рассылка WB появится отдельно"},
+                    400)
             seller_id = str(data.get("seller_id", "")).strip()
             text = str(data.get("text", "")).strip()
             if not seller_id or not text:
@@ -1805,7 +1847,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(ids, list) or not ids:
                 return self._send_json({"error": "Не выбрано ни одной записи"}, 400)
             allow_verified = bool(data.get("allow_verified"))
-            store = CRUD.store()
+            store = self._crm_for_body(data).store()
             targets = [str(x) for x in ids]
 
             # Подтверждённых без явного разрешения не удаляем: это собранная
@@ -1831,7 +1873,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json({"error": "Не выбрано ни одной записи"}, 400)
             # Удаляем только неподтверждённых: подтверждённых сносить по этой
             # кнопке нельзя, иначе случайное выделение уничтожит рабочие данные.
-            store = CRUD.store()
+            store = self._crm_for_body(data).store()
             safe = [str(x) for x in ids]
             rows = store.list_sellers(limit=1_000_000, tiers=["none", "heuristic"])
             allowed = {r["seller_id"] for r in rows}
@@ -1841,7 +1883,46 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"deleted": store.delete_sellers(targets),
                                     "skipped": len(safe) - len(targets)})
 
+        if path == "/api/worker/start":
+            # Воркер запускается отдельным процессом. Для Ozon нужен браузер:
+            # он общий с legacy-задачами дашборда, поэтому одновременный запуск
+            # запрещён (те же проверки, что делает ночной сбор перед стартом).
+            marketplace = str(data.get("marketplace", "")).strip()
+            if marketplace not in ("ozon", "wb"):
+                return self._send_json({"error": "marketplace: ozon|wb"}, 400)
+            if marketplace == "ozon":
+                if WORKERS.running("ozon"):
+                    return self._send_json({"error": "Воркер Ozon уже работает"}, 400)
+                if HARVEST.status().get("running"):
+                    return self._send_json({"error": "Идёт обычный сбор — воркер подождёт"}, 400)
+                if NIGHT.running():
+                    return self._send_json({"error": "Идёт ночной сбор — воркер подождёт"}, 400)
+                if SEND.status().get("running"):
+                    return self._send_json({"error": "Идёт рассылка — воркер подождёт"}, 400)
+            try:
+                WORKERS.start(marketplace, {
+                    "url": str(data.get("url", "")).strip(),
+                    "pages": max(1, min(int(data.get("pages") or 10), 1000)),
+                    "start_page": max(1, int(data.get("start_page") or 1)),
+                    "delay": data.get("delay"),
+                    "refresh_days": max(0, min(int(data.get("refresh_days") or 7), 365)),
+                })
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+            except Exception as exc:                      # noqa: BLE001
+                return self._send_json({"error": f"Ошибка запуска: {exc}"}, 500)
+            return self._send_json({"ok": True, **WORKERS.status(marketplace)})
+
+        if path == "/api/worker/stop":
+            marketplace = str(data.get("marketplace", "")).strip()
+            if not WORKERS.stop(marketplace):
+                return self._send_json({"error": f"Воркер {marketplace} не запущен"}, 400)
+            return self._send_json({"ok": True})
+
         if path == "/api/harvest":
+            # Legacy in-process сбор: конкурирует с воркером Ozon за браузер.
+            if WORKERS.running("ozon"):
+                return self._send_json({"error": "Работает воркер Ozon — сначала остановите его"}, 400)
             try:
                 delay = data.get("delay")
                 HARVEST.start(
@@ -1860,6 +1941,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": True})
 
         if path == "/api/night/start":
+            if WORKERS.running("ozon"):
+                return self._send_json({"error": "Работает воркер Ozon — сначала остановите его"}, 400)
             try:
                 NIGHT.start(
                     chunk_pages=max(1, min(int(data.get("chunk_pages") or 10), 100)),

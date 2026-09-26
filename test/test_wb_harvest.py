@@ -103,7 +103,7 @@ class HarvestTests(unittest.TestCase):
                     {"id": 1003, "name": "Без поставщика", "supplierId": 0},
                 ]),
             },
-            suppliers={100: RU_SUPPLIER, 200: CN_SUPPLIER, 300: None},
+            suppliers={"100": RU_SUPPLIER, "200": CN_SUPPLIER, "300": None},
         )
 
     def tearDown(self):
@@ -146,17 +146,20 @@ class HarvestTests(unittest.TestCase):
 
     def test_fresh_known_supplier_skipped_without_request(self):
         self.harvest()                                       # первый прогон пишет 200
-        before = self.client.requests
         info_calls_before = list(self.client.info_calls)
         stats = WBSellerHarvester(
             client=self.client, store=self.store, pacing=0, refresh_days=7
         ).run("органайзер", pages=1)
         self.assertEqual(stats.sellers_skipped, 1)
-        self.assertEqual(self.client.info_calls, info_calls_before)  # сеть не тратилась
-        self.assertGreater(self.client.requests, before)     # search ходит, seller-info нет
+        # Свежий (сохранённый) поставщик не перечитывается; отклонённый
+        # российский в базу не попадает, поэтому перепроверяется каждый прогон —
+        # так же ведёт себя Ozon-харвестер, кэш отказов в v1 не делаем.
+        second_run = self.client.info_calls[len(info_calls_before):]
+        self.assertNotIn("200", second_run)
+        self.assertIn("100", second_run)
 
     def test_blocked_exception_propagates(self):
-        self.client.suppliers[100] = WBBlocked("WB закрыл доступ (HTTP 403)")
+        self.client.suppliers["100"] = WBBlocked("WB закрыл доступ (HTTP 403)")
         with self.assertRaises(WBBlocked):
             self.harvest()
 

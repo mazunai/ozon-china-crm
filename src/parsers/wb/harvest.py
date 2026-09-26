@@ -26,8 +26,8 @@ import time
 from typing import Callable, Dict, List, Optional, Sequence
 from urllib.parse import unquote_plus
 
-from ..outreach.scoring import SellerMetrics, score_all
-from ..parsers.chinese_filter import classify_seller, ru_inn_is_valid
+from ...outreach.scoring import SellerMetrics, score_all
+from ..chinese_filter import classify_seller, ru_inn_is_valid
 from .transport import WBHttpClient, wb_pace
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,7 @@ class WBSellerHarvester:
         self.refresh_days = refresh_days
         # Пауза по умолчанию — из транспорта (WB_PACE), тесты подменяют нулём.
         self.pacing = wb_pace() if pacing is None else pacing
-        from ..crm.harvest import HarvestStats
+        from ...crm.harvest import HarvestStats
 
         self.stats = HarvestStats()
         self._known: Dict[str, dict] = {}
@@ -225,7 +225,7 @@ class WBSellerHarvester:
 
     def run(self, source: str, pages: int = 10, start_page: int = 1):
         """Полный проход: запрос → выдача → реквизиты → база."""
-        from ..crm.harvest import HarvestStats  # noqa: F401  (тип результата)
+        from ...crm.harvest import HarvestStats  # noqa: F401  (тип результата)
 
         query = query_from_source(source)
         self._log(f"Поисковый запрос: «{query}»"

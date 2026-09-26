@@ -261,6 +261,14 @@ AUTH = load_credentials()
 SESSION_COOKIE = "ozon_crm_session"
 SESSION_TOKEN = secrets.token_urlsafe(24)
 
+# Замок перебора пароля: 6 неудач с одного IP подряд — вход с этого IP
+# молчит 10 минут. Очередь старых неудач чистится по возрасту.
+LOGIN_MAX_FAILS = 6
+LOGIN_BLOCK_SECONDS = 600
+LOGIN_FAILS: deque = deque()
+LOGIN_FAILS_BY_IP: dict = {}
+LOGIN_BLOCKS: dict = {}
+
 LOGIN_PAGE = """<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -1756,19 +1764,45 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/login":
             from urllib.parse import parse_qs
+
+            # Замок от перебора пароля: после серии неудач с одного адреса
+            # вход замолкает на 10 минут. Лимит мягкий — живой человек его
+            # не заметит, брутфорс остановит.
+            client_ip = self.client_address[0]
+            now = time.time()
+            while LOGIN_FAILS and now - LOGIN_FAILS[0][0] > LOGIN_BLOCK_SECONDS:
+                LOGIN_FAILS.popleft()
+            blocked_until = LOGIN_BLOCKS.get(client_ip, 0)
+            if now < blocked_until:
+                retry = int(blocked_until - now) + 1
+                return self._send_json(
+                    {"error": f"Слишком много попыток — подождите {retry} с"}, 429)
+
             form_len = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(form_len).decode("utf-8", "replace") if form_len else ""
             data = {k: v[0] for k, v in parse_qs(raw).items() if v}
             if not AUTH[1] or data.get("password") == AUTH[1]:
+                LOGIN_BLOCKS.pop(client_ip, None)
+                # Secure-флаг только через HTTPS (прокси Caddy помечает схему):
+                # на локальном http cookie без Secure, иначе браузер его съест.
+                secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
                 body = "<meta http-equiv=\"refresh\" content=\"0;url=/\">".encode("utf-8")
                 self.send_response(303)
                 self.send_header("Set-Cookie",
-                                 f"{SESSION_COOKIE}={SESSION_TOKEN}; Path=/; HttpOnly; SameSite=Lax")
+                                 f"{SESSION_COOKIE}={SESSION_TOKEN}; Path=/; HttpOnly; SameSite=Lax{secure}")
                 self.send_header("Location", "/")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return self._send_json({"ok": True})
+            fails = LOGIN_FAILS_BY_IP[client_ip] = LOGIN_FAILS_BY_IP.get(client_ip, 0) + 1
+            LOGIN_FAILS.append((now, client_ip))
+            if fails >= LOGIN_MAX_FAILS:
+                LOGIN_BLOCKS[client_ip] = now + LOGIN_BLOCK_SECONDS
+                LOGIN_FAILS_BY_IP.pop(client_ip, None)
+                logging.getLogger(__name__).warning(
+                    "Вход заблокирован на %s с на %s: %d неудачных попыток",
+                    LOGIN_BLOCK_SECONDS, client_ip, fails)
             return self._serve_login("Неверный пароль")
 
         if path == "/api/logout":

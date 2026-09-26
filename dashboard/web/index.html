@@ -1327,11 +1327,6 @@
             "</select></label>" +
           '<span class="muted">категория ставится автоматически, здесь можно поправить</span>' +
         "</div>" +
-        '<div class="row" style="margin-top:10px;align-items:center">' +
-          '<button class="ghost" id="btnHandover"' + (d.handed_to_manager_at ? " disabled" : "") + '>Передать менеджеру</button>' +
-          '<span class="muted" id="handoverState">' +
-            (d.handed_to_manager_at ? "передан " + esc(fmtDate(d.handed_to_manager_at)) : "кнопка для заинтересованных") + "</span>" +
-        "</div>" +
         '<div class="muted" style="margin-top:12px">Ответить в чат Ozon</div>' +
         '<textarea id="replyText" rows="4" spellcheck="false" style="width:100%;margin-top:6px;' +
           'background:var(--card2);border:1px solid var(--line);color:var(--text);' +
@@ -1366,17 +1361,6 @@
               toast("Не сохранено: " + err.message, "err");
               select.value = d.reply_category || "";
             });
-        });
-
-        // Передача менеджеру: отметка в базе, продавец остаётся в общем списке
-        $("btnHandover").addEventListener("click", function(){
-          if (!confirm("Передать продавца менеджеру? Отметка сохранится в базе.")) { return; }
-          postJson("/api/seller/handover", {seller_id: d.seller_id, marketplace: MARKETPLACE})
-            .then(function(){
-              toast("Продавец передан менеджеру", "ok");
-              openDrawer(d.seller_id);   // перерисовать карточку с отметкой
-            })
-            .catch(function(err){ toast("Не передано: " + err.message, "err"); });
         });
 
         // Стадия сделки: сохраняется сразу при смене

@@ -1315,10 +1315,8 @@
           html += '<div class="muted">Почему считается китайским</div><div class="reasons">' +
             esc(d.chinese_reasons) + "</div>";
         }
-        if (d.message_sent) {
-          html += '<div class="muted" style="margin-top:12px">Последнее отправленное сообщение</div>' +
-            '<div class="reasons">' + esc(d.message_sent) + "</div>";
-        }
+        // Последнее отправленное сообщение НЕ дублируем: оно и так первое
+        // в истории переписки ниже (журнал хранит все отправки целиком)
         html += '<div id="historyBox" style="margin-top:10px"></div>';
         // CRM: категория ответа, стадия сделки и ответ продавцу прямо из карточки
         var catOptions = Object.keys(REPLY_LABELS).map(function(key){

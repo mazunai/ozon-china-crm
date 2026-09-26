@@ -1464,8 +1464,19 @@
   }
 
   function loadWorker(){
+    // WB может быть выключен на сервере (WB_ENABLED=0): карточки нет — и
+    // опрашивать нечего, иначе applyWorker упадёт на отсутствующих элементах.
+    if (!document.getElementById("wbCard")) { return; }
     return fetch("/api/worker?marketplace=wb").then(function(r){ return r.json(); })
       .then(applyWorker).catch(function(){});
+  }
+
+  function hideWb(){
+    var sw = document.getElementById("mpSwitch");
+    if (sw && sw.parentNode) { sw.parentNode.removeChild(sw); }
+    var card = document.getElementById("wbCard");
+    if (card && card.parentNode) { card.parentNode.removeChild(card); }
+    MARKETPLACE = "ozon";
   }
 
   $("btnWbStart").addEventListener("click", function(){
@@ -2228,6 +2239,11 @@
 
   loadSummary();
   loadStats();
+  // Сервер — источник правды о том, включён ли WB: флагом WB_ENABLED он
+  // убирает и переключатель, и карточку воркера без правок фронтенда.
+  fetch("/api/health").then(function(r){ return r.json(); }).then(function(h){
+    if (h && h.wb_enabled === false) { hideWb(); }
+  }).catch(function(){});
   loadWorker();
   var views = ["overview","sellers","rejected","harvest","send"];
   var initial = (location.hash || "").replace("#", "");

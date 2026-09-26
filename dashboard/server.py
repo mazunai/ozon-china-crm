@@ -54,6 +54,12 @@ DEFAULT_PORT = 8000
 DATA_DIR = REPO_ROOT / "data"
 DB_PATH = DATA_DIR / "sellers.sqlite3"
 
+# Wildberries: код воркера и CRM в проекте остаётся, но по умолчанию выключен
+# (пока работаем чисто с Ozon — WB не мельтешит ни в UI, ни в API). Вернуть:
+# WB_ENABLED=1 в .env и перезапуск дашборда — переключатель и карточка WB
+# появятся сами, база sellers-wb.sqlite3 останется как была.
+WB_ENABLED = (os.environ.get("WB_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
+
 # Учётные данные дашборда. Дашборд публикуется наружу через SSH-туннель,
 # поэтому без пароля он открыт всему интернету. Пароль лежит в .env
 # (файл в .gitignore), логин по умолчанию — admin.
@@ -1613,6 +1619,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_file(WEB_DIR / name, content_type)
         if not self._check_auth():
             return
+        # Один замок на все wb-запросы: пока WB_ENABLED=0, никакой обработчик
+        # маркетплейса недоступен, даже через прямые вызовы API.
+        if self._query().get("marketplace") == "wb" and not WB_ENABLED:
+            return self._send_json(
+                {"error": "WB отключён (вернуть: WB_ENABLED=1 в .env)", "wb_enabled": False}, 400)
         if path in ("/", "/index.html"):
             return self._send_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
         if path == "/api/sellers":
@@ -1709,7 +1720,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/results":
             return self._send_json(SERVICE.results())
         if path == "/api/health":
-            return self._send_json({"ok": True})
+            return self._send_json({"ok": True, "wb_enabled": WB_ENABLED})
         if path == "/api/parser-check":
             SERVICE.check_parser()
             return self._send_json({
@@ -1820,6 +1831,12 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(raw.decode("utf-8") or "{}")
         except Exception:
             return self._send_json({"error": "Некорректный JSON"}, 400)
+
+        # Зеркало GET-замка: любые wb-команды (запуск воркера, правки CRM)
+        # отклоняются, пока маркетплейс выключен.
+        if str(data.get("marketplace", "ozon")) == "wb" and not WB_ENABLED:
+            return self._send_json(
+                {"error": "WB отключён (вернуть: WB_ENABLED=1 в .env)", "wb_enabled": False}, 400)
 
         if path == "/api/seller/note":
             seller_id = str(data.get("seller_id", "")).strip()

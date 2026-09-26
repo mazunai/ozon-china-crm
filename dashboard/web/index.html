@@ -160,7 +160,14 @@
   .kpi .k-sub{color:var(--dim);font-size:11px;margin-top:3px}
   .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
   .chart-wrap{position:relative;height:200px}
-  .fb-bar{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:12px}
+  .fb-bar{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:12px;
+    border-radius:8px;padding:3px 6px;margin-left:-6px;margin-right:-6px;
+    transition:background .15s, box-shadow .15s}
+  /* При наведении полоска вспыхивает своим цветом — видно, к какому статусу относится */
+  .fb-bar:hover{background:color-mix(in srgb, var(--sc, #3b82f6) 16%, transparent);
+    cursor:default}
+  .fb-bar:hover .fb-fill{box-shadow:0 0 12px color-mix(in srgb, var(--sc, #3b82f6) 60%, transparent)}
+  .fb-bar:hover .fb-count{color:var(--sc, #3b82f6)}
   .fb-track{flex:1;height:13px;background:rgba(255,255,255,.06);border-radius:7px;overflow:hidden}
   .fb-fill{height:100%;border-radius:7px;background:linear-gradient(90deg,var(--sc,#3b82f6),color-mix(in srgb,var(--sc,#3b82f6) 40%,#22d3ee))}
   .fb-count{width:38px;text-align:right;color:var(--text);font-weight:600;flex:0 0 auto}
@@ -303,7 +310,9 @@
     <div class="card">
       <h2>Ответили <span class="badge ok" id="ovRepliesCount"></span></h2>
       <div id="ovReplies"><div class="muted">Загрузка…</div></div>
+      <div class="muted" id="ovRepliesAuto"></div>
       <div class="muted" style="margin-top:8px">Входящие из чатов Ozon — только реальные ответы. Клик по строке откроет карточку продавца, ответить можно прямо там.</div>
+      <div class="muted" id="ovRepliesAuto" style="margin-top:4px"></div>
     </div>
     <div class="card">
       <h2>Пора напомнить</h2>
@@ -1389,7 +1398,8 @@
     ];
     var max = Math.max.apply(null, steps.map(function(s){ return s.value; })) || 1;
     $("ovFunnel").innerHTML = steps.map(function(s){
-      return '<div class="fb-bar ' + s.cls + '"><span style="width:92px;color:var(--dim)">' +
+      return '<div class="fb-bar ' + s.cls + '" title="' + esc(s.label) + ": " +
+        fmtNum(s.value) + '"><span style="width:92px;color:var(--dim)">' +
         esc(s.label) + '</span><span class="fb-track"><span class="fb-fill" style="width:' +
         Math.max(2, Math.round(s.value / max * 100)) + '%"></span></span><span class="fb-count">' +
         fmtNum(s.value) + "</span></div>";
@@ -1399,7 +1409,22 @@
   // «Ответили»: реальные входящие из чатов — кто ответил и что написал.
   function renderReplies(){
     var rows = STATS.replies || [];
+    var auto = STATS.inboxAuto || {};
+    var autoText = "автопроверка чатов каждые " + (auto.interval_min || 30) + " мин";
+    if (auto.last_run) {
+      autoText += " · последняя " + fmtDate(auto.last_run) + " — " + (auto.last_result || "");
+    } else {
+      autoText += " · ещё не запускалась";
+    }
+    $("ovRepliesAuto").textContent = autoText;
     $("ovRepliesCount").textContent = rows.length ? "(" + rows.length + ")" : "";
+    // Статус автопроверки: работает ли расписание и когда последний проход
+    var auto = STATS.inboxAuto || {};
+    if (auto.interval_min) {
+      var when = auto.last_run ? fmtDate(auto.last_run) : "ещё не было";
+      $("ovRepliesAuto").textContent = "автопроверка каждые " + auto.interval_min +
+        " мин · последняя: " + when + (auto.last_result ? " — " + auto.last_result : "");
+    }
     if (!rows.length) {
       $("ovReplies").innerHTML = '<div class="muted">Ответов пока нет — здесь появится первый, как только продавец напишет.</div>';
       return;
@@ -1592,6 +1617,8 @@
       STATS.stageLabels = d.stage_labels || {};
       STATS.reminders = d.reminders || [];
       STATS.replies = d.replies_recent || [];
+      STATS.inboxAuto = d.inbox_auto || {};
+      STATS.inboxAuto = d.inbox_auto || {};
       renderOverview();
       renderCharts();
       renderRecent();

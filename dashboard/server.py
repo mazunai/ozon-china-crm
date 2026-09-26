@@ -633,6 +633,82 @@ class NightHarvest:
 NIGHT = NightHarvest()
 
 
+class InboxAuto:
+    """Автопроверка входящих чатов по расписанию: раз в 30 минут.
+
+    Работает в фоновом потоке дашборда. Браузер общий: если сбор, рассылка
+    или ответ продавцу его заняли — этот цикл просто пропускается и проверка
+    повторится в следующий раз. Результат — в лог дашборда и в Telegram
+    (если настроен chat_id), новые ответы сразу получают статус «ответил».
+    """
+
+    INTERVAL = 1800        # 30 минут
+    FIRST_DELAY = 120      # первая проверка через 2 минуты после старта
+
+    def __init__(self):
+        self.state = {
+            "last_run": "",
+            "last_result": "",
+            "found": 0,
+            "interval_min": self.INTERVAL // 60,
+        }
+        self._busy = threading.Lock()
+
+    def status(self) -> dict:
+        return dict(self.state)
+
+    def start(self) -> None:
+        threading.Thread(target=self._loop, daemon=True, name="inbox-auto").start()
+
+    def _loop(self) -> None:
+        time.sleep(self.FIRST_DELAY)
+        while True:
+            self._run_once()
+            time.sleep(self.INTERVAL)
+
+    def _run_once(self) -> None:
+        if not self._busy.acquire(blocking=False):
+            return
+        try:
+            if not BROWSER_LOCK.acquire(blocking=False):
+                self.state["last_result"] = "пропущено — браузер занят"
+                return
+            try:
+                from src.crm.inbox import InboxChecker
+
+                result = InboxChecker(CRUD.store()).check()
+                self.state.update({
+                    "last_run": datetime.now().isoformat(timespec="seconds"),
+                    "last_result": (
+                        f"чатов {result['chats']}, непрочитанных {result['unread']}, "
+                        f"пометили {len(result['marked'])}"
+                    ),
+                    "found": len(result["marked"]),
+                })
+                HUB.log(
+                    "Автопроверка чатов: "
+                    + self.state["last_result"]
+                    + (f", не совпали с базой: {', '.join(result['unmatched'])}"
+                       if result["unmatched"] else "")
+                )
+                from src.notify import telegram as tg
+
+                for marked in result["marked"]:
+                    tg.send(f"💬 Ответил: {marked['shop']}\n{marked['text'][:400]}")
+            except Exception as exc:                  # noqa: BLE001
+                self.state.update({
+                    "last_run": datetime.now().isoformat(timespec="seconds"),
+                    "last_result": f"ошибка: {str(exc)[:160]}",
+                })
+            finally:
+                BROWSER_LOCK.release()
+        finally:
+            self._busy.release()
+
+
+INBOX_AUTO = InboxAuto()
+
+
 class SendRunner:
     """Отправка сообщений из дашборда.
 
@@ -1496,6 +1572,7 @@ class Handler(BaseHTTPRequestHandler):
                 "sent_by_day": store.sent_by_day(days=15),
                 "received_by_day": store.received_by_day(days=15),
                 "replies_recent": store.replies_recent(limit=10),
+                "inbox_auto": INBOX_AUTO.status(),
                 "recent": store.recent_messages(limit=14),
                 "status_labels": STATUS_LABELS,
                 # CRM: стадии сделки и «пора напомнить» — кто ответил и замолчал
@@ -1896,6 +1973,7 @@ def main() -> None:
     print(f"\n  Дашборд Ozon-парсера: {url}\n  Остановка: Ctrl+C\n", flush=True)
 
     SERVICE.check_parser()
+    INBOX_AUTO.start()
     if args.open or is_local:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 

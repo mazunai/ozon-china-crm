@@ -73,8 +73,10 @@ echo
 echo "[3/4] Проверяю зависимости…"
 ssh "${SSH_OPTS[@]}" "$VM" "
   cd $REMOTE_DIR
-  .venv/bin/python -c 'import selenium, openpyxl' 2>/dev/null \
-    && echo '  selenium + openpyxl: есть' \
+  # curl_cffi обязателен: без него WB-воркер не стартует (WB закрывает
+  # обычный requests по TLS-отпечатку). Если чего-то нет — ставим всё.
+  .venv/bin/python -c 'import selenium, openpyxl, curl_cffi' 2>/dev/null \
+    && echo '  selenium + openpyxl + curl_cffi: есть' \
     || { echo '  ставлю недостающее…'; .venv/bin/pip install -q -r requirements.txt; }
 "
 

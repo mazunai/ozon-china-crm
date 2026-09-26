@@ -86,6 +86,9 @@ CRM_COLUMNS = {
     # от updated_at: инкрементальный сбор пропускает известных продавцов и
     # возвращается к их модалкам только раз в N дней (флаг --refresh-days).
     "metrics_at": "TEXT NOT NULL DEFAULT ''",
+    # Стадия сделки для тех, кто ответил: '', 'negotiation', 'deal', 'dead'.
+    # Отдельная ось CRM: статус — про рассылку, стадия — про сделку.
+    "stage": "TEXT NOT NULL DEFAULT ''",
 }
 
 # Журнал отправок. В sellers.message_sent хранится только последнее сообщение
@@ -398,6 +401,8 @@ class SellerStore:
         allowed_order = {
             "score", "orders", "reviews", "months_on_ozon", "rating",
             "shop_name", "company_name", "province", "status", "last_seen_at",
+            # Дата последнего входящего: сортировка «кто ответил»
+            "last_reply_at",
         }
         order_by = order_by if order_by in allowed_order else "score"
 
@@ -408,9 +413,17 @@ class SellerStore:
             search=search,
             tiers=tiers,
         )
+        order_sql = "last_reply_at" if order_by == "last_reply_at" else order_by
+        # База в подзапросе: WHERE остаётся однозначным (без префиксов), а JOIN
+        # с сообщениями добавляет last_reply_at поверх отфильтрованных строк.
         sql = (
-            f"SELECT {SELECT_FIELDS} FROM sellers{where} "
-            f"ORDER BY {order_by} {'DESC' if descending else 'ASC'} LIMIT ? OFFSET ?"
+            f"SELECT t.*, r.last_reply_at FROM "
+            f"(SELECT {SELECT_FIELDS} FROM sellers{where}) t "
+            f"LEFT JOIN (SELECT seller_id, MAX(sent_at) AS last_reply_at "
+            f"FROM messages WHERE result = 'received' GROUP BY seller_id) r "
+            f"ON r.seller_id = t.seller_id "
+            f"ORDER BY {order_sql} {'DESC' if descending else 'ASC'} "
+            f"LIMIT ? OFFSET ?"
         )
         params.extend([max(1, limit), max(0, offset)])
 
@@ -717,6 +730,80 @@ class SellerStore:
                 (shop_name.strip(),),
             ).fetchone()
 
+    # --- CRM: стадии сделки -------------------------------------------------
+
+    STAGE_LABELS = {
+        "": "—",
+        "negotiation": "переговоры",
+        "deal": "сделка",
+        "dead": "закрыли",
+    }
+
+    def set_stage(self, seller_id: str, stage: str) -> bool:
+        """Стадия сделки: пусто / переговоры / сделка / закрыли."""
+        if stage not in self.STAGE_LABELS:
+            raise ValueError(f"Неизвестная стадия: {stage}")
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE sellers SET stage = ?, updated_at = ? WHERE seller_id = ?",
+                (stage, _now(), seller_id),
+            )
+        return cur.rowcount > 0
+
+    def stage_counts(self) -> dict:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT stage, COUNT(*) AS n FROM sellers WHERE stage != '' "
+                "GROUP BY stage"
+            ).fetchall()
+        return {r["stage"]: int(r["n"]) for r in rows}
+
+    def reminders(self, days: int = 3, limit: int = 12) -> List[dict]:
+        """«Пора напомнить»: ответили и замолчали больше N дней.
+
+        Свежесть — по последней записи в журнале сообщений (входящее или
+        исходящее); кто на стадии «сделка» или «закрыли», не тревожим.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(
+            timespec="seconds"
+        )
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT s.seller_id, s.shop_name, s.stage, s.status, "
+                "       COALESCE(m.last_at, s.updated_at) AS last_touch, "
+                "       s.score "
+                "FROM sellers s "
+                "LEFT JOIN (SELECT seller_id, MAX(sent_at) AS last_at "
+                "           FROM messages GROUP BY seller_id) m "
+                "  ON m.seller_id = s.seller_id "
+                "WHERE s.status = 'replied' "
+                "  AND s.stage NOT IN ('deal', 'dead') "
+                "  AND COALESCE(m.last_at, s.updated_at) < ? "
+                "ORDER BY s.score DESC LIMIT ?",
+                (cutoff, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def replied_export_rows(self, limit: int = 2000) -> List[dict]:
+        """Ответившие со стадиями и последними сообщениями — для XLSX."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT s.seller_id, s.shop_name, s.company_name, s.province, "
+                "       s.orders, s.reviews, s.rating, s.score, s.status, s.stage, "
+                "       s.notes, s.seller_profile_url, "
+                "       (SELECT text FROM messages WHERE seller_id = s.seller_id "
+                "         AND result = 'received' ORDER BY id DESC LIMIT 1) AS last_incoming, "
+                "       (SELECT text FROM messages WHERE seller_id = s.seller_id "
+                "         AND result = 'sent' ORDER BY id DESC LIMIT 1) AS last_outgoing "
+                "FROM sellers s "
+                "WHERE s.status = 'replied' OR s.stage != '' "
+                "ORDER BY s.score DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def message_history(self, seller_id: str, limit: int = 50) -> List[sqlite3.Row]:
         """История переписки с продавцом, свежие сверху."""
         with self._connect() as conn:
@@ -753,6 +840,19 @@ class SellerStore:
             rows = conn.execute(
                 "SELECT substr(sent_at, 1, 10) AS d, COUNT(*) AS n FROM messages "
                 "WHERE result = 'sent' AND sent_at >= ? GROUP BY d ORDER BY d",
+                (cutoff,),
+            ).fetchall()
+        return [{"date": r["d"], "count": int(r["n"])} for r in rows]
+
+    def received_by_day(self, days: int = 15) -> List[dict]:
+        """Ответы продавцов по дням (result='received') — для графика."""
+        from datetime import timedelta
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT substr(sent_at, 1, 10) AS d, COUNT(*) AS n FROM messages "
+                "WHERE result = 'received' AND sent_at >= ? GROUP BY d ORDER BY d",
                 (cutoff,),
             ).fetchall()
         return [{"date": r["d"], "count": int(r["n"])} for r in rows]

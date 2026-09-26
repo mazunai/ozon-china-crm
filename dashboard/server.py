@@ -902,6 +902,14 @@ class SendRunner:
             log(f"Отправка завершена: отправлено {self.state['sent']}, ошибок {self.state['failed']}"
                 + (f", пропущено {self.state['skipped']}" if self.state.get("skipped") else "")
                 + (f" ({self.state['stopped_reason']})" if self.state.get("stopped_reason") else ""))
+            from src.notify import telegram as tg
+
+            tg.send(
+                f"📨 Отправка завершена: отправлено {self.state['sent']}"
+                f", ошибок {self.state['failed']}"
+                + (f", пропущено {self.state['skipped']}" if self.state.get("skipped") else "")
+                + (f"\n{self.state['stopped_reason']}" if self.state.get("stopped_reason") else "")
+            )
             HUB.publish({"type": "send", **self.state})
             HUB.publish({"type": "send_done", "stats": self.state})
         except Exception as exc:                             # noqa: BLE001
@@ -1486,8 +1494,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({
                 "status_counts": store.status_counts(),
                 "sent_by_day": store.sent_by_day(days=15),
+                "received_by_day": store.received_by_day(days=15),
                 "recent": store.recent_messages(limit=14),
                 "status_labels": STATUS_LABELS,
+                # CRM: стадии сделки и «пора напомнить» — кто ответил и замолчал
+                "stage_counts": store.stage_counts(),
+                "stage_labels": store.STAGE_LABELS,
+                "reminders": store.reminders(days=3, limit=12),
             })
         if path == "/api/seller/detail":
             seller_id = self._query().get("seller_id", "")
@@ -1499,6 +1512,23 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
             self.send_header("Content-Disposition", 'attachment; filename="ozon-sellers.csv"')
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/api/sellers/replies.xlsx":
+            # Выгрузка «ответивших»: карточка + последняя переписка — для
+            # менеджера и планшета.
+            from src.crm.xlsx_export import replied_xlsx
+
+            body = replied_xlsx(CRUD.store().replied_export_rows())
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            self.send_header("Content-Disposition", 'attachment; filename="otvetivshie.xlsx"')
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -1627,6 +1657,41 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(CRUD.set_status(seller_id, status))
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
+
+        if path == "/api/seller/stage":
+            seller_id = str(data.get("seller_id", "")).strip()
+            if not seller_id:
+                return self._send_json({"error": "Не указан seller_id"}, 400)
+            try:
+                return self._send_json({"ok": CRUD.store().set_stage(seller_id, str(data.get("stage", "")))})
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+
+        if path == "/api/seller/reply":
+            # Ответ из дашборда: открываем чат продавца в общем Chrome и
+            # отправляем текст. Синхронно (~20–40 с) — кнопка в интерфейсе
+            # крутится, пока не придёт ответ.
+            seller_id = str(data.get("seller_id", "")).strip()
+            text = str(data.get("text", "")).strip()
+            if not seller_id or not text:
+                return self._send_json({"error": "Нужны seller_id и текст"}, 400)
+            if not BROWSER_LOCK.acquire(blocking=False):
+                return self._send_json(
+                    {"error": "Браузер занят другой задачей — дождитесь её завершения"}, 400)
+            try:
+                from src.crm.reply import reply_to_seller
+
+                result = reply_to_seller(SEND.DATA_DIR, CRUD.store(), seller_id, text)
+                HUB.log(f"Ответ из дашборда: {seller_id} — текст ушёл в чат Ozon")
+                from src.notify import telegram as tg
+
+                shop = (CRUD.detail(seller_id) or {}).get("shop_name") or seller_id
+                tg.send(f"💬 Ответ ушёл продавцу {shop}:\n{text[:400]}")
+            except Exception as exc:                      # noqa: BLE001
+                return self._send_json({"error": str(exc)[:300]}, 500)
+            finally:
+                BROWSER_LOCK.release()
+            return self._send_json(result)
 
         if path == "/api/sellers/delete":
             ids = data.get("seller_ids") or []
@@ -1757,6 +1822,11 @@ class Handler(BaseHTTPRequestHandler):
                     f"пометили «ответил» {len(result['marked'])}"
                     + (f", не совпали с базой: {', '.join(result['unmatched'])}"
                        if result["unmatched"] else ""))
+                # Кто ответил — сразу в Telegram: не нужно держать дашборд открытым
+                from src.notify import telegram as tg
+
+                for marked in result["marked"]:
+                    tg.send(f"💬 Ответил: {marked['shop']}\n{marked['text'][:400]}")
             except Exception as exc:                      # noqa: BLE001
                 return self._send_json({"error": f"Не удалось проверить: {exc}"}, 500)
             finally:

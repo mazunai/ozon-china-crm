@@ -162,11 +162,14 @@ class OutreachQueue:
 
     # --- Выдача работы -----------------------------------------------------
 
-    def claim_next(self, require_product_url: bool = True) -> Optional[sqlite3.Row]:
+    def claim_next(self, require_product_url: bool = True,
+                   order_fresh: bool = False) -> Optional[sqlite3.Row]:
         """Возвращает следующего продавца и помечает его как «в работе».
 
-        Сортировка по score DESC: первыми идут самые крупные и «долгоживущие»
-        продавцы. Требуем непустой sample_product_url — без него некуда открыть
+        По умолчанию сортировка по score DESC: первыми идут самые крупные и
+        «долгоживущие» продавцы. order_fresh=True — по свежести: только что
+        найденные сбором получают сообщение в первые часы, у них шанс ответа
+        выше. Требуем непустой sample_product_url — без него некуда открыть
         чат, и продавец застрянет в очереди навсегда.
         """
         with self._connect() as conn:
@@ -175,8 +178,9 @@ class OutreachQueue:
             if require_product_url:
                 where += " AND sample_product_url != ''"
 
+            order = "first_seen_at DESC, score DESC" if order_fresh else "score DESC"
             row = conn.execute(
-                f"SELECT * FROM sellers WHERE {where} ORDER BY score DESC LIMIT 1",
+                f"SELECT * FROM sellers WHERE {where} ORDER BY {order} LIMIT 1",
                 params,
             ).fetchone()
             if not row:

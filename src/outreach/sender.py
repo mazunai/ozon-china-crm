@@ -49,6 +49,7 @@ class SenderConfig:
     window_start: str = "10:00"         # рабочее окно: раньше не пишем
     window_end: str = "19:00"           # позже не пишем
     max_attempts: int = 2               # сколько раз пробовать одного продавца
+    fresh_first: bool = False           # сначала только что найденные сбором
     dry_run: bool = True                # по умолчанию НЕ отправляем, а показываем
     stop_file: str = "STOP"
 
@@ -782,7 +783,7 @@ def run_queue(
                 report["preview"] = {"seller_id": row["seller_id"], "shop": shop, "message": message}
                 break
 
-            row = queue.claim_next()
+            row = queue.claim_next(order_fresh=config.fresh_first)
             if not row:
                 report["stopped_reason"] = "очередь пуста"
                 progress(report["stopped_reason"])

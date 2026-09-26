@@ -398,6 +398,18 @@ def main() -> int:
             f"продавцов {totals['sellers']}, следующая страница {page}",
             log_file,
         )
+        # Итог ночи в Telegram (если настроен токен и chat_id)
+        try:
+            from src.notify.telegram import send as tg_send
+
+            tg_send(
+                "🌙 Ночной сбор завершён: проходов {c}, товаров {p}, продавцов {s} "
+                "(USCC {u}), следующая страница {np}".format(
+                    c=chunks, p=totals["products"], s=totals["sellers"],
+                    u=totals["uscc"], np=page)
+            )
+        except Exception:                                    # noqa: BLE001
+            pass
     return 0
 
 

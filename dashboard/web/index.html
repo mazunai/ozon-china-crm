@@ -103,6 +103,8 @@
   td.wrap{white-space:normal;max-width:340px}
   tbody tr:hover{background:rgba(255,255,255,.03)}
   tbody tr.selected{background:rgba(59,130,246,.10)}
+  /* Ответившие подсвечены фиолетовой рамкой слева — видно сразу */
+  tbody tr.row-replied{box-shadow:inset 3px 0 0 var(--purple);background:rgba(167,139,250,.06)}
   .empty{padding:44px 20px;text-align:center;color:var(--dim)}
   .pager{display:flex;align-items:center;gap:10px;margin-top:12px;font-size:13px;color:var(--dim)}
   .badge-verify{display:inline-block;font-size:11px;padding:1px 6px;border-radius:10px;
@@ -294,6 +296,15 @@
 <main>
   <section class="view active" id="view-overview">
     <div class="metric-grid" id="ovMetrics"></div>
+    <div class="card">
+      <h2>Воронка</h2>
+      <div id="ovFunnel"><div class="muted">Загрузка…</div></div>
+    </div>
+    <div class="card">
+      <h2>Пора напомнить</h2>
+      <div id="ovReminders"><div class="muted">Загрузка…</div></div>
+      <div class="muted" style="margin-top:8px">Ответили и молчат дольше 3 дней. Клик — откроются «ответившие».</div>
+    </div>
     <div class="grid-2">
       <div class="card">
         <h2>Отправки за 14 дней</h2>
@@ -325,6 +336,7 @@
         <span class="spacer"></span>
         <button class="primary" id="btnQueue">Кому писать сегодня</button>
         <button class="ghost" id="btnExport">Экспорт CSV</button>
+        <button class="ghost" id="btnExportReplies">Ответившие XLSX</button>
         <button class="ghost" id="btnReload">Обновить</button>
       </div>
       <div class="row" id="bulkRow" style="display:none">
@@ -350,6 +362,7 @@
             <th data-sort="reviews" style="width:90px">Отзывы</th>
             <th data-sort="months_on_ozon" style="width:72px">Срок</th>
             <th data-sort="rating" style="width:70px">Рейтинг</th>
+            <th data-sort="last_reply_at" style="width:96px">Ответ</th>
             <th class="nosort" style="width:140px">Статус</th>
             <th class="nosort" style="width:190px">Заметка</th>
             <th class="nosort" style="width:92px"></th>
@@ -464,6 +477,7 @@
         <label class="check">лимит в сутки <input type="number" id="sCap" min="1" max="200"></label>
         <label class="check">с <input type="text" id="sWindowStart" style="min-width:70px;width:70px"></label>
         <label class="check">до <input type="text" id="sWindowEnd" style="min-width:70px;width:70px"></label>
+        <label class="check"><input type="checkbox" id="sFreshFirst"> свежие первыми</label>
       </div>
       <div class="row">
         <button class="ghost" id="btnSaveSettings">Сохранить настройки</button>
@@ -635,7 +649,8 @@
     replied:"ответил продавец", refused:"отказался", failed:"ошибка отправки",
     skipped:"пропущен", opted_out:"просил не писать"
   };
-  var RESULT_COLOR = {sent:"#34d399", error:"#f87171", failed:"#f87171"};
+  var RESULT_COLOR = {sent:"#34d399", error:"#f87171", failed:"#f87171", received:"#a78bfa"};
+  var RESULT_TITLE = {received:"ответил"};
 
   /* ---------- вкладки ---------- */
   function showView(name){
@@ -768,6 +783,10 @@
       "<td>" + fmtNum(r.reviews) + "</td>" +
       "<td>" + (r.months_on_ozon || 0) + " мес</td>" +
       "<td>" + (r.rating || 0).toFixed(1) + "</td>" +
+      // Колонка «Ответ»: дата входящего, фиолетовым — сразу видно, кто ответил
+      "<td>" + (r.last_reply_at
+        ? '<span class="badge-verify warehouse">✉ ' + esc(fmtDate(r.last_reply_at)) + "</span>"
+        : '<span class="muted">—</span>') + "</td>" +
       '<td><select class="sel-status st-' + esc(r.status || "new") + '" data-seller="' +
         esc(r.seller_id) + '">' + statusOptions(r.status) + "</select></td>" +
       '<td><input class="note-input" data-seller="' + esc(r.seller_id) + '" value="' +
@@ -818,6 +837,7 @@
     var profile = r.seller_profile_url || ("https://www.ozon.ru/seller/" + r.seller_id + "/");
     var checked = selected.has(r.seller_id) ? " checked" : "";
     var meta = ["оценка <b>" + (r.score || 0).toFixed(1) + "</b>"];
+    if (r.last_reply_at) { meta.push('✉ <b>ответ ' + esc(fmtDate(r.last_reply_at)) + "</b>"); }
     if (r.province) { meta.push(esc(r.province)); }
     meta.push("заказы " + fmtNum(r.orders));
     meta.push("отзывы " + fmtNum(r.reviews));
@@ -852,7 +872,8 @@
     var html = "", cardsHtml = "";
 
     t.rows.forEach(function(r){
-      html += '<tr data-seller="' + esc(r.seller_id) + '">' +
+      var rowCls = (name === "sellers" && r.status === "replied") ? ' class="row-replied"' : "";
+      html += '<tr data-seller="' + esc(r.seller_id) + '"' + rowCls + '>' +
         (name === "sellers" ? sellerRowHtml(r) : rejectedRowHtml(r)) + "</tr>";
       cardsHtml += name === "sellers" ? sellerCardHtml(r) : rejectedCardHtml(r);
     });
@@ -1076,6 +1097,25 @@
             '<div class="reasons">' + esc(d.message_sent) + "</div>";
         }
         html += '<div id="historyBox" style="margin-top:14px"></div>';
+        // CRM: стадия сделки и ответ продавцу прямо из карточки
+        html += '<div class="row" style="margin-top:14px;align-items:center">' +
+          '<label class="check">стадия ' +
+            '<select id="stStage" style="min-width:130px">' +
+              '<option value="">—</option>' +
+              '<option value="negotiation"' + (d.stage === "negotiation" ? " selected" : "") + '>переговоры</option>' +
+              '<option value="deal"' + (d.stage === "deal" ? " selected" : "") + '>сделка</option>' +
+              '<option value="dead"' + (d.stage === "dead" ? " selected" : "") + '>закрыли</option>' +
+            "</select></label>" +
+          '<span class="muted">стадия видна в воронке на «Обзоре»</span>' +
+        "</div>" +
+        '<div class="muted" style="margin-top:12px">Ответить в чат Ozon</div>' +
+        '<textarea id="replyText" rows="4" spellcheck="false" style="width:100%;margin-top:6px;' +
+          'background:var(--card2);border:1px solid var(--line);color:var(--text);' +
+          'border-radius:9px;padding:10px;resize:vertical;font:inherit;font-size:13px"></textarea>' +
+        '<div class="row" style="margin-top:8px">' +
+          '<button class="primary" id="btnReplySend">Отправить ответ</button>' +
+          '<span class="muted" id="replyState">уходит в чат Ozon продавца</span>' +
+        "</div>";
         html += '<div class="row" style="margin-top:16px">' +
           '<a href="' + esc(profile) + '" target="_blank" rel="noopener">Профиль на Ozon ↗</a>' +
           (d.sample_product_url ? ' · <a href="' + esc(d.sample_product_url) +
@@ -1085,6 +1125,34 @@
         $("drawer").classList.add("open");
         $("overlay").classList.add("open");
         $("drawerClose").addEventListener("click", closeDrawer);
+
+        // Стадия сделки: сохраняется сразу при смене
+        $("stStage").addEventListener("change", function(){
+          postJson("/api/seller/stage", {seller_id: d.seller_id, stage: this.value})
+            .then(function(){ toast("Стадия сохранена", "ok"); loadStats(); })
+            .catch(function(err){ toast("Не сохранено: " + err.message, "err"); });
+        });
+
+        // Ответ продавцу: уходит в его чат Ozon, в карточке появится в истории
+        $("btnReplySend").addEventListener("click", function(){
+          var btn = this;
+          var text = $("replyText").value.trim();
+          if (!text) { toast("Напишите текст ответа", "err"); return; }
+          btn.disabled = true;
+          $("replyState").textContent = "открываю чат… (до полуминуты)";
+          postJson("/api/seller/reply", {seller_id: d.seller_id, text: text})
+            .then(function(){
+              toast("Ответ отправлен: " + (d.shop_name || d.seller_id), "ok");
+              $("replyText").value = "";
+              $("replyState").textContent = "уходит в чат Ozon продавца";
+              openDrawer(d.seller_id);   // перерисовать карточку с новой историей
+            })
+            .catch(function(err){
+              toast("Не ушло: " + err.message, "err");
+              $("replyState").textContent = "уходит в чат Ozon продавца";
+            })
+            .then(function(){ btn.disabled = false; });
+        });
 
         // История переписки: в sellers хранится только последнее сообщение,
         // а журнал знает все попытки
@@ -1301,6 +1369,50 @@
     }).join("");
   }
 
+  // Воронка: в базе → написали → ответили → переговоры → сделка → закрыли.
+  function renderFunnel(){
+    var c = STATS.counts || {};
+    var st = STATS.stageCounts || {};
+    var contacted = (c.sent || 0) + (c.replied || 0) + (c.refused || 0) + (c.opted_out || 0);
+    var steps = [
+      {label: "В базе", value: STATS.total || 0, cls: "kp-blue"},
+      {label: "Написали", value: contacted, cls: "st-sent"},
+      {label: "Ответили", value: c.replied || 0, cls: "st-replied"},
+      {label: "Переговоры", value: st.negotiation || 0, cls: "kp-purple"},
+      {label: "Сделка", value: st.deal || 0, cls: "kp-ok"},
+      {label: "Закрыли", value: st.dead || 0, cls: "kp-err"}
+    ];
+    var max = Math.max.apply(null, steps.map(function(s){ return s.value; })) || 1;
+    $("ovFunnel").innerHTML = steps.map(function(s){
+      return '<div class="fb-bar ' + s.cls + '"><span style="width:92px;color:var(--dim)">' +
+        esc(s.label) + '</span><span class="fb-track"><span class="fb-fill" style="width:' +
+        Math.max(2, Math.round(s.value / max * 100)) + '%"></span></span><span class="fb-count">' +
+        fmtNum(s.value) + "</span></div>";
+    }).join("");
+  }
+
+  // «Пора напомнить»: ответили и молчат дольше 3 дней (список с сервера).
+  function renderReminders(){
+    var rows = STATS.reminders || [];
+    if (!rows.length) {
+      $("ovReminders").innerHTML = '<div class="muted">Пока никто не завис — все свежие.</div>';
+      return;
+    }
+    $("ovReminders").innerHTML = rows.map(function(r){
+      return '<div class="recent-item" data-reminder="1" style="cursor:pointer">' +
+        '<span class="st-dot st-replied"></span>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div class="recent-shop">' + esc(r.shop_name || r.seller_id) +
+            (r.stage ? ' <span class="st-chip kp-purple">' +
+              esc(STATS.stageLabels[r.stage] || r.stage) + "</span>" : "") + "</div>" +
+          '<div class="recent-text">последнее касание ' + esc(fmtDate(r.last_touch)) +
+            " · оценка " + (r.score || 0).toFixed(1) + "</div>" +
+        "</div>" +
+        '<span class="recent-when">напомнить ↗</span>' +
+      "</div>";
+    }).join("");
+  }
+
   // Полоски без библиотеки: тот же смысл, если CDN недоступен.
   function fallbackBars(canvas, items){
     var box = canvas.parentNode;
@@ -1337,6 +1449,11 @@
       return p.length === 3 ? (p[2] + "." + p[1]) : d.date;
     });
     var values = days.map(function(d){ return d.count; });
+    // Ответы продавцов — вторым набором: сразу видно, где replied
+    var rdays = STATS.rdays || [];
+    var rmap = {};
+    rdays.forEach(function(d){ rmap[d.date] = d.count; });
+    var rvalues = days.map(function(d){ return rmap[d.date] || 0; });
 
     var counts = STATS.counts || {};
     var stKeys = STATUS_ORDER.filter(function(s){ return (counts[s] || 0) > 0; });
@@ -1345,7 +1462,9 @@
     var stColors = stKeys.map(colorOf);
 
     if (!window.Chart) {
-      fallbackBars($("ovBar"), days.map(function(d, i){ return {label: labels[i], count: d.count}; }));
+      fallbackBars($("ovBar"), days.map(function(d, i){
+        return {label: labels[i] + " ✉" + (rvalues[i] || 0), count: d.count};
+      }));
       fallbackBars($("ovDonut"), stKeys.map(function(s){
         return {label: STATUS_LABELS[s] || s, count: counts[s] || 0, cls: "st-" + s};
       }));
@@ -1368,11 +1487,18 @@
       grad.addColorStop(1, "rgba(34,211,238,.35)");
       chartBar = new Chart(ctx, {
         type:"bar",
-        data:{labels: labels, datasets:[{label:"Отправлено", data: values, backgroundColor: grad,
-          borderRadius: 5, borderSkipped: false, maxBarThickness: 26}]},
+        data:{labels: labels, datasets:[
+          {label:"Отправлено", data: values, backgroundColor: grad,
+           borderRadius: 5, borderSkipped: false, maxBarThickness: 26},
+          {label:"Ответили", data: rvalues,
+           backgroundColor: "rgba(167,139,250,.85)", borderRadius: 5,
+           borderSkipped: false, maxBarThickness: 26}
+        ]},
         options:{responsive:true, maintainAspectRatio:false, animation:{duration:400},
-          plugins:{legend:{display:false}, tooltip:{callbacks:{label:function(c){
-            return "Отправлено: " + c.parsed.y; }}}},
+          plugins:{legend:{display:true, labels:{color:"#93a0b4", boxWidth:9, boxHeight:9,
+            usePointStyle:true, pointStyle:"circle", font:font}},
+            tooltip:{callbacks:{label:function(c){
+              return c.dataset.label + ": " + c.parsed.y; }}}},
           scales:{x:{grid:{display:false}, ticks:{color:"#93a0b4", font:font}},
                   y:{beginAtZero:true, grid:grid, ticks:{color:"#93a0b4", font:font, precision:0}}}}
       });
@@ -1404,10 +1530,13 @@
     }
     $("ovRecent").innerHTML = rows.map(function(m){
       var color = RESULT_COLOR[m.result] || "#3b82f6";
+      var title = RESULT_TITLE[m.result] || (m.result === "error" ? "ошибка" : m.result);
       var mark = m.result === "sent" ? "" :
-        ' <span class="st-chip" style="--sc:' + color + '">' + esc(m.result === "error" ? "ошибка" : m.result) + "</span>";
+        ' <span class="st-chip" style="--sc:' + color + '">' + esc(title) + "</span>";
+      var dot = m.result === "sent" ? "st-sent"
+        : m.result === "received" ? "st-replied" : "st-failed";
       return '<div class="recent-item">' +
-        '<span class="st-dot st-' + (m.result === "sent" ? "sent" : "failed") + '"></span>' +
+        '<span class="st-dot ' + dot + '"></span>' +
         '<div style="flex:1;min-width:0">' +
           '<div class="recent-shop">' + esc(m.shop_name || m.seller_id) + mark + "</div>" +
           '<div class="recent-text">' + esc(String(m.text || "").slice(0, 160)) + "</div>" +
@@ -1424,9 +1553,15 @@
       STATS.counts = d.status_counts || {};
       STATS.days = d.sent_by_day || [];
       STATS.recent = d.recent || [];
+      STATS.rdays = d.received_by_day || [];
+      STATS.stageCounts = d.stage_counts || {};
+      STATS.stageLabels = d.stage_labels || {};
+      STATS.reminders = d.reminders || [];
       renderOverview();
       renderCharts();
       renderRecent();
+      renderFunnel();
+      renderReminders();
     }).catch(function(){});
   }
 
@@ -1450,6 +1585,11 @@
     loadTable("sellers");
     toast("Показаны: " + (STATUS_LABELS[status] || status), "ok");
   }
+
+  // Клик по строке «Пора напомнить» — к «ответившим».
+  document.addEventListener("click", function(ev){
+    if (closestTo(ev.target, "[data-reminder]")) { goStatus("replied"); }
+  });
 
   /* ---------- события сервера ---------- */
   function connect(){
@@ -1590,6 +1730,9 @@
   $("btnExport").addEventListener("click", function(){
     window.location = "/api/sellers/export.csv?" + params(T.sellers).toString();
   });
+  $("btnExportReplies").addEventListener("click", function(){
+    window.location = "/api/sellers/replies.xlsx";
+  });
   $("rPurge").addEventListener("click", function(){
     var ids = (T.rejected.rows || []).map(function(r){ return r.seller_id; });
     if (!ids.length) { toast("На этой странице нечего удалять"); return; }
@@ -1684,6 +1827,7 @@
       $("sCap").value = s.daily_cap;
       $("sWindowStart").value = s.window_start;
       $("sWindowEnd").value = s.window_end;
+      $("sFreshFirst").checked = !!s.fresh_first;
       loadTemplate();
       var stopInfo = (d.preflight.checks || []).filter(function(c){ return c.key === "stop"; })[0];
       $("stopFileInfo").textContent = stopInfo ? stopInfo.detail : "—";
@@ -1801,7 +1945,8 @@
       interval_jitter_minutes: parseInt($("sJitter").value, 10),
       daily_cap: parseInt($("sCap").value, 10),
       window_start: $("sWindowStart").value.trim(),
-      window_end: $("sWindowEnd").value.trim()
+      window_end: $("sWindowEnd").value.trim(),
+      fresh_first: $("sFreshFirst").checked
     }).then(function(){ toast("Настройки сохранены", "ok"); loadSend(); })
       .catch(function(err){ toast("Не сохранилось: " + err.message, "err"); });
   });

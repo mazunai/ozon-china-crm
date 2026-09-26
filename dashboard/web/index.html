@@ -649,6 +649,8 @@
         <button class="ghost" id="btnNightRefresh">Обновить</button>
       </div>
       <div class="muted" id="nightFresh" style="margin-top:6px"></div>
+      <div class="bar" style="margin-top:10px"><div class="fill" id="nightBar" style="width:0%"></div></div>
+      <div class="muted" id="nightLive" style="margin-top:6px;font-weight:600"></div>
       <div class="muted" style="margin-top:8px">
         Идёт порциями: между порциями пауза, при сбое повторяет ту же страницу,
         пройденное запоминает — после перезапуска продолжит с места остановки.
@@ -1456,8 +1458,50 @@
     $("tabCountHarvest").className = "badge" + (running ? " ok" : "");
 
     var d = n.days || {};
+    var live = n.live || {};
+    var phase = live.phase || "";
+
+    // Живая полоса: сколько прошёл текущий проход, и что происходит прямо
+    // сейчас — по фазе из лога (сбор страниц → определение продавцов →
+    // проверка реквизитов → запись), а не по прочеркам
+    var pct = 0, liveText = "", nowValue = "—", nowSub = "ожидание запуска";
+    if (running && phase) {
+      nowSub = phase;
+      if (phase === "собираю товары") {
+        if (live.page) { nowValue = live.page; }
+        if (live.chunk_end > live.chunk_start) {
+          pct = (live.page - live.chunk_start + 1) / (live.chunk_end - live.chunk_start + 1) * 100;
+          liveText = "Собираю товары: страница " + live.page +
+            " (проход " + live.chunk_start + "–" + live.chunk_end + ")";
+        } else {
+          liveText = "Собираю товары: страница " + (live.page || "…");
+        }
+      } else if (phase === "определяю продавцов") {
+        if (live.items_total) { nowValue = live.items_done + "/" + live.items_total; }
+        pct = live.items_total ? live.items_done / live.items_total * 100 : 0;
+        liveText = "Определяю продавцов по карточкам: " + (live.items_done || 0) + " из " +
+          (live.items_total || "…") +
+          (live.sellers_found ? " · найдено продавцов: " + live.sellers_found : "");
+      } else if (phase === "проверяю реквизиты") {
+        if (live.checked_total) { nowValue = live.checked_done + "/" + live.checked_total; }
+        pct = live.checked_total ? live.checked_done / live.checked_total * 100 : 0;
+        liveText = "Проверяю реквизиты: " + (live.checked_done || 0) + " из " + (live.checked_total || "…");
+      } else if (phase === "записываю в базу") {
+        pct = 100;
+        liveText = "Записываю в базу: добавлено " + (live.added || 0) +
+          ", свежих пропущено " + (live.skipped || 0);
+      } else if (phase === "пауза между проходами") {
+        pct = 100;
+        nowValue = n.next_page || "—";
+        nowSub = "пауза · следующий чанк";
+        liveText = "Проход доигран, пауза — следующий чанк начнёт со страницы " + (n.next_page || "…");
+      }
+    }
+    $("nightBar").style.width = Math.min(100, Math.max(running ? 3 : 0, pct)) + "%";
+    $("nightLive").textContent = liveText;
+
     $("nightStats").innerHTML =
-      kpiCard("kp-blue", "Сейчас на странице", n.current_page || "—", "идёт обход прямо сейчас") +
+      kpiCard("kp-blue", "Сейчас", nowValue, nowSub) +
       kpiCard("kp-blue", "Следующая страница", n.next_page, "с неё продолжит") +
       kpiCard("kp-ok", "Продавцов за ночь", d.sellers, "найдено и обновлено") +
       kpiCard("kp-purple", "Товаров", d.products, "просмотрено карточек") +
@@ -1486,6 +1530,9 @@
     }
 
     var lines = n.log || [];
+    // В логе каждая строка приходит дважды (logger + stdout) — подряд идущие
+    // дубли на экране не показываем
+    lines = lines.filter(function(line, i){ return i === 0 || line !== lines[i - 1]; });
     $("nightLog").innerHTML = lines.length
       ? lines.map(function(line){ return "<div>" + esc(line) + "</div>"; }).join("")
       : '<div class="log-empty">Пока пусто — сбор ещё не запускали.</div>';
@@ -2457,10 +2504,11 @@
   showView(views.indexOf(initial) >= 0 ? initial : "overview");
   connect();
   setInterval(function(){ loadSummary(); loadStats(); }, 60000);
-  // Пока открыта вкладка «Сбор», следим за ночным сбором и WB-воркером
+  // Пока открыта вкладка «Сбор», следим за ночным сбором и WB-воркером —
+  // часто: отсюда берётся «живое» ощущение прогресса
   setInterval(function(){
     if ($("view-harvest").classList.contains("active")) { loadNight(); loadWorker(); }
-  }, 20000);
+  }, 5000);
 
   /* ---------- переключатель маркетплейса ---------- */
   document.querySelectorAll(".mp-btn").forEach(function(btn){

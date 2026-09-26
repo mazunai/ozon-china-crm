@@ -627,7 +627,7 @@ class NightHarvest:
     def _log_path(self) -> Path:
         return self.LOG_DIR / f"night_harvest_{datetime.now().strftime('%Y-%m-%d')}.log"
 
-    def _tail(self, lines: int = 14) -> list:
+    def _tail(self, lines: int = 30) -> list:
         """Хвост сегодняшнего лога — его показываем в дашборде."""
         path = self._log_path()
         if not path.exists():
@@ -661,6 +661,15 @@ class NightHarvest:
             if found:
                 current_page = int(found.group(1))
                 break
+
+        # --- живой разбор: что происходит внутри чанка прямо сейчас ----------
+        # Окно парсинга много больше показываемого хвоста: между «Страница N:»
+        # и концом файла бывают десятки строк прогресса по товарам/продавцам,
+        # из-за чего «Сейчас на странице» показывал прочерк.
+        live = self._parse_live(self._tail(400))
+        if live.get("page"):
+            current_page = live["page"]
+
         return {
             "running": self.running(),
             "stop_requested": self.STOP_FILE.exists(),
@@ -679,8 +688,63 @@ class NightHarvest:
                 "uscc": int(totals.get("uscc") or 0),
                 "errors": int(totals.get("errors") or 0),
             },
+            "live": live,
             "log": log_lines,
         }
+
+    # Порядок важен: фаза определяется САМОЙ СВЕЖЕЙ строкой лога, которую
+    # узнаёт один из шаблонов. Строки в логе дублируются (logger + stdout) —
+    # на «самую свежую» это не влияет.
+    _LIVE_PATTERNS = (
+        ("проверяю реквизиты", re.compile(r"Проверено продавцов: (\d+)/(\d+)")),
+        ("определяю продавцов", re.compile(r"Обработано товаров: (\d+)/(\d+), продавцов (\d+)")),
+        ("записываю в базу", re.compile(r"В базу: добавлено (\d+), свежих пропущено (\d+)")),
+        ("собираю товары", re.compile(r"Страница (\d+):")),
+        ("пауза между проходами", re.compile(r"(за ночь: чанков|итог: страниц|Готово\. страниц)")),
+    )
+
+    @classmethod
+    def _parse_live(cls, lines: List[str]) -> dict:
+        """Фаза и числа текущего прохода из хвоста лога ночного сбора.
+
+        Числа собираются по всем шаблонам независимо (какое значение последнее
+        в логе, такое и актуально), а фаза — по самой свежей узнанной строке.
+        """
+        live = {
+            "phase": "", "page": 0, "chunk_start": 0, "chunk_end": 0,
+            "items_done": 0, "items_total": 0, "sellers_found": 0,
+            "checked_done": 0, "checked_total": 0, "added": 0, "skipped": 0,
+        }
+        fresh = list(reversed([line for line in lines if line.strip()]))
+        seen = set()
+        for line in fresh:
+            for phase, pattern in cls._LIVE_PATTERNS:
+                match = pattern.search(line)
+                if not match or phase in seen:
+                    continue
+                # Каждое значение — из САМОЙ СВЕЖЕЙ своей строки: идём от
+                # конца лога, первое совпадение шаблона и фиксируем
+                seen.add(phase)
+                if not live["phase"]:
+                    live["phase"] = phase
+                if phase == "проверяю реквизиты":
+                    live["checked_done"], live["checked_total"] = int(match.group(1)), int(match.group(2))
+                elif phase == "определяю продавцов":
+                    live["items_done"], live["items_total"] = int(match.group(1)), int(match.group(2))
+                    live["sellers_found"] = int(match.group(3))
+                elif phase == "записываю в базу":
+                    live["added"], live["skipped"] = int(match.group(1)), int(match.group(2))
+                elif phase == "собираю товары":
+                    live["page"] = int(match.group(1))
+                break
+        # Диапазон текущего прохода ищем по всему окну: он печатается один раз
+        # в начале чанка и нужен для процента полосы
+        for line in fresh:
+            found = re.search(r"чанк: страницы (\d+)–(\d+)", line)
+            if found:
+                live["chunk_start"], live["chunk_end"] = int(found.group(1)), int(found.group(2))
+                break
+        return live
 
     def start(self, chunk_pages: int, until: str, pause: float, refresh_days: int,
               url: str = "") -> None:

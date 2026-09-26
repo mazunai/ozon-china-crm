@@ -282,7 +282,14 @@
     .cs-title{flex:1;min-width:0;word-break:break-word}
     .cs-title b{font-size:15px}
     .cs-title .muted{display:block;margin-top:2px}
-    .cs-link{font-size:15px;padding:2px 6px;flex:0 0 auto}
+    /* Кнопка профиля: крупная тап-зона (44×38, как у кнопок выше), акцентная
+       плашка вместо голой стрелки, вертикально по центру строки */
+    .cs-link{display:inline-flex;align-items:center;justify-content:center;width:44px;height:38px;
+      flex:0 0 auto;align-self:center;border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);
+      border-radius:10px;background:color-mix(in srgb,var(--accent) 14%,transparent);color:#8ab4f8;
+      font-size:17px;font-weight:600;text-decoration:none;transition:background .15s,border-color .15s}
+    .cs-link:hover,.cs-link:active{background:color-mix(in srgb,var(--accent) 28%,transparent);
+      border-color:var(--accent)}
     .cs-meta{margin-top:8px;font-size:13px;color:var(--dim);line-height:1.55}
     .cs-meta b{color:var(--text)}
     .cs-actions{display:grid;grid-template-columns:1fr 1.4fr;gap:8px;margin-top:10px}

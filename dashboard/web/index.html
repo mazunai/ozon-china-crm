@@ -171,6 +171,8 @@
     background:linear-gradient(90deg,var(--sc),color-mix(in srgb,var(--sc) 30%,transparent))}
   .kpi:hover:not(:disabled){transform:translateY(-2px);border-color:color-mix(in srgb,var(--sc) 55%,transparent);
     box-shadow:0 8px 20px rgba(0,0,0,.3)}
+  .kpi.k-sel{border-color:color-mix(in srgb,var(--sc) 75%,transparent);
+    box-shadow:0 0 0 1px color-mix(in srgb,var(--sc) 65%,transparent) inset}
   .kpi:disabled{cursor:default}
   .kpi .k-top{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px;margin-bottom:7px}
   .kpi .k-num{font-size:23px;font-weight:800;line-height:1.1}
@@ -652,6 +654,7 @@
       <div class="bar" style="margin-top:10px"><div class="fill" id="nightBar" style="width:0%"></div></div>
       <div class="muted" id="nightLive" style="margin-top:6px;font-weight:600"></div>
       <div class="metric-grid" id="nightStats" style="margin-top:12px"></div>
+      <div class="log" id="nightDetails" style="display:none;margin-top:10px;max-height:240px;overflow:auto"></div>
       <details style="margin-top:4px">
         <summary class="muted" style="cursor:pointer">Хвост лога ночного сбора</summary>
         <div class="log" id="nightLog" style="height:220px;margin-top:8px"></div>
@@ -1455,6 +1458,8 @@
     var d = n.days || {};
     var live = n.live || {};
     var phase = live.phase || "";
+    NIGHT_LAST = n;
+    NIGHT_LOG = n.log || [];
 
     // Живая полоса: сколько прошёл текущий проход, и что происходит прямо
     // сейчас — по фазе из лога (сбор страниц → определение продавцов →
@@ -1496,13 +1501,20 @@
     $("nightLive").textContent = liveText;
 
     $("nightStats").innerHTML =
-      kpiCard("kp-blue", "Сейчас", nowValue, nowSub) +
-      kpiCard("kp-blue", "Следующая страница", n.next_page, "с неё продолжит") +
-      kpiCard("kp-ok", "Продавцов за ночь", d.sellers, "найдено и обновлено") +
-      kpiCard("kp-purple", "Товаров", d.products, "просмотрено карточек") +
-      kpiCard("kp-blue", "Проходов", n.chunks_done, "порций подряд") +
-      kpiCard("kp-ok", "USCC подтверждено", d.uscc, "по реквизитам") +
-      kpiCard("kp-err", "Ошибок", d.errors, "записей с ошибкой");
+      nightCard("now", "kp-blue", "Сейчас", nowValue, nowSub) +
+      nightCard("next", "kp-blue", "Следующая страница", n.next_page, "с неё продолжит") +
+      nightCard("sellers", "kp-ok", "Продавцов за ночь", d.sellers, "найдено и обновлено") +
+      nightCard("products", "kp-purple", "Товаров", d.products, "просмотрено карточек") +
+      nightCard("chunks", "kp-blue", "Проходов", n.chunks_done, "порций подряд") +
+      nightCard("uscc", "kp-ok", "USCC подтверждено", d.uscc, "по реквизитам") +
+      nightCard("errors", "kp-err", "Ошибок", d.errors, "записей с ошибкой");
+    // Панель подробностей живёт между перерисовками: подсвечиваем выбранную
+    // карточку и обновляем её содержимое, чтобы цифры в панели не застывали
+    if (nightDetailsKey) {
+      var sel = document.querySelector('#nightStats [data-night="' + nightDetailsKey + '"]');
+      if (sel) { sel.classList.add("k-sel"); }
+      renderNightDetails();
+    }
 
     // Свежесть лога: по ней сразу видно, что сбор живёт, а не встал
     if (running && n.log_updated_at) {
@@ -1547,6 +1559,83 @@
         renderNight(n);
       }).catch(function(){});
   }
+
+  /* ---------- раскрывающиеся карточки ночного сбора ---------- */
+  var NIGHT_LAST = {}, NIGHT_LOG = [], nightDetailsKey = "";
+
+  // По каким строкам лога искать подробности каждой карточки
+  var NIGHT_FILTERS = {
+    sellers: /[Нн]айдено продавцов|В базу:|за ночь:/,
+    products: /Страница \d+:|Обработано товаров|Новых товаров/,
+    chunks: /чанк: страницы|итог: страниц|за ночь:/,
+    uscc: /USCC/,
+    errors: /[Оо]шиб|ERR:|упал|не получена|не удал/
+  };
+
+  function nightCard(key, cls, label, value, sub){
+    return '<button class="kpi ' + cls + '" data-night="' + key +
+      '" title="Нажмите — подробности из лога">' +
+      '<div class="k-top">' + esc(label) + "</div>" +
+      '<div class="k-num">' + esc(fmtNum(value)) + "</div>" +
+      (sub ? '<div class="k-sub">' + esc(sub) + "</div>" : "") +
+      "</button>";
+  }
+
+  function renderNightDetails(){
+    var box = $("nightDetails");
+    if (!nightDetailsKey) { box.style.display = "none"; box.innerHTML = ""; return; }
+    var n = NIGHT_LAST || {};
+    var lines = [], title = "";
+    if (nightDetailsKey === "now" || nightDetailsKey === "next") {
+      // Эти две — сводка состояния, а не срез лога
+      if (nightDetailsKey === "now") {
+        title = "Что происходит прямо сейчас";
+        lines = [
+          "состояние: " + (n.running ? "идёт" : "не идёт"),
+          $("nightLive").textContent || "фаза не определена",
+          $("nightFresh").textContent || ""
+        ];
+      } else {
+        title = "Где продолжится сбор";
+        lines = [
+          "продолжит со страницы: " + (n.next_page || 1),
+          n.updated_at ? "последний прогресс: " + n.updated_at : "прогресса ещё не было",
+          n.last_result ? "последний чанк: " + n.last_result : "",
+          n.failures ? "сбоев подряд: " + n.failures : ""
+        ];
+      }
+      lines = lines.filter(Boolean);
+    } else {
+      var filter = NIGHT_FILTERS[nightDetailsKey];
+      lines = NIGHT_LOG.filter(function(line){ return filter.test(line); });
+      title = "Из лога ночного сбора: " + lines.length + " строк";
+    }
+    box.innerHTML = '<div class="muted" style="margin-bottom:6px">' + esc(title) + "</div>" +
+      (lines.length
+        ? lines.map(function(line){ return "<div>" + esc(line) + "</div>"; }).join("")
+        : '<div class="log-empty">В хвосте лога таких строк нет.</div>');
+    box.style.display = "block";
+    box.scrollTop = box.scrollHeight;
+  }
+
+  $("nightStats").addEventListener("click", function(ev){
+    var card = ev.target.closest("[data-night]");
+    if (!card) { return; }
+    var key = card.getAttribute("data-night");
+    if (nightDetailsKey === key) {
+      nightDetailsKey = "";
+      card.classList.remove("k-sel");
+      $("nightDetails").style.display = "none";
+      $("nightDetails").innerHTML = "";
+      return;
+    }
+    nightDetailsKey = key;
+    document.querySelectorAll("#nightStats .kpi").forEach(function(c){
+      c.classList.remove("k-sel");
+    });
+    card.classList.add("k-sel");
+    renderNightDetails();
+  });
 
   $("btnNightStart").addEventListener("click", function(){
     var chunk = parseInt($("nChunk").value, 10) || 10;

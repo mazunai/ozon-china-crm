@@ -645,7 +645,11 @@ class NightHarvest:
         except (OSError, ValueError):
             state = {}
         totals = state.get("totals") or {}
-        log_lines = self._tail()
+        log_lines = self._tail(120)
+        # В логе каждая строка приходит дважды (logger + stdout): подряд идущие
+        # дубли схлопываем, чтобы фильтры подробностей не показывали одно дважды
+        log_lines = [line for i, line in enumerate(log_lines)
+                     if i == 0 or line != log_lines[i - 1]]
         # «Сбор жив?» — вопрос, который возникает сразу, если лог подолгу не
         # меняется: показываем время последней записи и страницу, на которой
         # сборщик находится прямо сейчас.

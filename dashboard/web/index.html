@@ -329,6 +329,11 @@
       <div id="ovFunnel"><div class="muted">Загрузка…</div></div>
     </div>
     <div class="card">
+      <h2>Живость продавцов <span class="badge" id="ovVitalityBadge"></span></h2>
+      <div id="ovVitality"><div class="muted">Загрузка…</div></div>
+      <div class="muted" style="margin-top:8px">Кто отвечает на отзывы покупателей, а кто молчит — по сэмплу отзывов, снятому с карточек товаров при сборе. «Мало данных» — пока менее 3 рассмотренных отзывов; проценты считаются среди продавцов с достаточным сэмплом.</div>
+    </div>
+    <div class="card">
       <h2>Ответили <span class="badge ok" id="ovRepliesCount"></span></h2>
       <div id="ovReplies"><div class="muted">Загрузка…</div></div>
       <div class="muted" id="ovRepliesAuto"></div>
@@ -368,6 +373,11 @@
           <option value="uscc">только USCC</option>
           <option value="warehouse">только склад</option>
         </select>
+        <select id="fVitality">
+          <option value="">живость: все</option>
+          <option value="replies">только отвечающие</option>
+          <option value="silent">только молчуны</option>
+        </select>
         <button class="ghost" id="btnReset">Сбросить</button>
         <span class="spacer"></span>
         <button class="primary" id="btnQueue">Кому писать сегодня</button>
@@ -398,6 +408,7 @@
             <th data-sort="reviews" style="width:90px">Отзывы</th>
             <th data-sort="months_on_ozon" style="width:72px">Срок</th>
             <th data-sort="rating" style="width:70px">Рейтинг</th>
+            <th data-sort="vitality" style="width:118px" title="Отвечает ли продавец на отзывы — по сэмплу отзывов с карточек">Живость</th>
             <th data-sort="last_reply_at" style="width:96px">Ответ</th>
             <th class="nosort" style="width:140px">Статус</th>
             <th class="nosort" style="width:190px">Заметка</th>
@@ -764,7 +775,7 @@
 
   /* ---------- состояние таблиц ---------- */
   var T = {
-    sellers: {limit:50, offset:0, search:"", statuses:[], provinces:[], tier:"",
+    sellers: {limit:50, offset:0, search:"", statuses:[], provinces:[], tier:"", vitality:"",
               categories:[], order_by:"score", order:"desc", rows:[], total:0, verified_only:true},
     rejected:{limit:50, offset:0, search:"", statuses:[], provinces:[], tier:"none",
               order_by:"score", order:"desc", rows:[], total:0, verified_only:false}
@@ -782,6 +793,7 @@
     if (t.statuses.length) p.set("status", t.statuses.join(","));
     if (t.provinces.length) p.set("province", t.provinces.join(","));
     if (t.categories.length) p.set("category", t.categories.join(","));
+    if (t.vitality) p.set("vitality", t.vitality);
     if (MARKETPLACE === "wb") p.set("marketplace", "wb");
     return p;
   }
@@ -793,6 +805,7 @@
       t.statuses = $("fStatus").value ? [$("fStatus").value] : [];
       t.provinces = $("fProvince").value ? [$("fProvince").value] : [];
       t.tier = $("fTier").value;
+      t.vitality = $("fVitality").value;
       // Спец-значение «все заинтересованные» — три категории сразу
       t.categories = $("fCategory").value === "__interested"
         ? ["positive", "interested", "needs_info"]
@@ -879,6 +892,22 @@
       esc(REPLY_LABELS[key] || key) + "</span>";
   }
 
+  // Живость: честные числа из сэмпла («отвечает 4/5»), без процентов-обещаний.
+  // Цвет чипа — по категории уверенности: зелёный отвечает, красный молчит.
+  function vitalityCell(v){
+    if (!v || !v.seen) { return '<span class="muted">—</span>'; }
+    if (v.category === "unknown") { return '<span class="muted">мало данных</span>'; }
+    var cls = v.category === "replies" ? "rc-positive"
+            : (v.category === "silent" ? "rc-negative" : "rc-neutral");
+    return '<span class="st-chip ' + cls + '" title="уверенность ' +
+      esc((v.score || 0).toFixed(2)) + '">' + esc(v.label) + " " +
+      esc(v.replies) + "/" + esc(v.seen) + "</span>";
+  }
+  function vitalityText(v){
+    if (!v || !v.seen || v.category === "unknown") { return ""; }
+    return v.label + " " + v.replies + "/" + v.seen;
+  }
+
   function sellerRowHtml(r){
     var badge = "";
     if (r.verified_by === "uscc") { badge = '<span class="badge-verify">USCC</span>'; }
@@ -898,6 +927,8 @@
       "<td>" + fmtNum(r.reviews) + "</td>" +
       "<td>" + (r.months_on_ozon || 0) + " мес</td>" +
       "<td>" + (r.rating || 0).toFixed(1) + "</td>" +
+      // Живость: сэмпл отзывов с карточек — отвечает продавец или молчит
+      "<td>" + vitalityCell(r.vitality) + "</td>" +
       // Колонка «Ответ»: дата входящего + категория, сразу видно, кто и как ответил
       "<td>" + (r.last_reply_at
         ? '<span class="badge-verify warehouse">✉ ' + esc(fmtDate(r.last_reply_at)) + "</span>" + replyChip(r.reply_category)
@@ -953,6 +984,7 @@
     var checked = selected.has(r.seller_id) ? " checked" : "";
     var meta = ["оценка <b>" + (r.score || 0).toFixed(1) + "</b>"];
     if (r.last_reply_at) { meta.push('✉ <b>ответ ' + esc(fmtDate(r.last_reply_at)) + "</b>"); }
+    if (vitalityText(r.vitality)) { meta.push(esc(vitalityText(r.vitality))); }
     if (r.province) { meta.push(esc(r.province)); }
     meta.push("заказы " + fmtNum(r.orders));
     meta.push("отзывы " + fmtNum(r.reviews));
@@ -997,7 +1029,7 @@
 
     if (!t.rows.length) {
       empty.style.display = "block";
-      empty.innerHTML = (t.search || t.provinces.length || t.statuses.length || t.tier || (t.categories && t.categories.length))
+      empty.innerHTML = (t.search || t.provinces.length || t.statuses.length || t.tier || t.vitality || (t.categories && t.categories.length))
         ? "<div>Ничего не найдено по этим условиям.</div>"
         : (name === "sellers"
             ? "<div>База пуста. Откройте вкладку «Сбор» и соберите продавцов.</div>"
@@ -1652,6 +1684,37 @@
     }).join("");
   }
 
+  // Живость продавцов: кто отвечает на отзывы, кто молчит. Проценты — только
+  // среди продавцов с достаточным сэмплом (>= 3 отзыва), иначе это враньё.
+  function renderVitality(){
+    var v = STATS.vitality || {};
+    var sampled = v.sampled || 0;
+    var badge = $("ovVitalityBadge");
+    var box = $("ovVitality");
+    if (!sampled) {
+      badge.textContent = "";
+      box.innerHTML = '<div class="muted">Сэмплов пока нет — они снимаются с карточек товаров во время сбора и накопятся после первого прогона.</div>';
+      return;
+    }
+    badge.textContent = "сэмпл у " + fmtNum(sampled) + " из " + fmtNum(v.verified || sampled);
+    var pct = function(n){ return Math.round((n || 0) / sampled * 100) + "%"; };
+    var rows = [
+      {label: "отвечают", n: v.replies || 0, cls: "kp-ok"},
+      {label: "иногда", n: v.mixed || 0, cls: "kp-purple"},
+      {label: "молчат", n: v.silent || 0, cls: "kp-err"}
+    ];
+    var max = Math.max.apply(null, rows.map(function(r){ return r.n; })) || 1;
+    box.innerHTML = rows.map(function(r){
+      return '<div class="fb-bar ' + r.cls + '" title="' + esc(r.label) + ": " +
+        fmtNum(r.n) + ' продавцов"><span style="width:92px;color:var(--dim)">' +
+        esc(r.label) + '</span><span class="fb-track"><span class="fb-fill" style="width:' +
+        Math.max(2, Math.round(r.n / max * 100)) + '%"></span></span><span class="fb-count">' +
+        fmtNum(r.n) + " · " + pct(r.n) + "</span></div>";
+    }).join("") +
+    '<div class="fb-bar" title="Продавцы, по кому сэмпл ещё мал"><span style="width:92px;color:var(--dim)">мало данных</span>' +
+    '<span class="fb-track"></span><span class="fb-count">' + fmtNum(v.unknown || 0) + "</span></div>";
+  }
+
   // «Ответили»: реальные входящие из чатов — кто ответил и что написал.
   function renderReplies(){
     var rows = STATS.replies || [];
@@ -1867,10 +1930,12 @@
       STATS.inboxAuto = d.inbox_auto || {};
       STATS.commCounts = d.comm_counts || {};
       STATS.replyCounts = d.reply_counts || {};
+      STATS.vitality = d.vitality_counts || {};
       renderOverview();
       renderCharts();
       renderRecent();
       renderFunnel();
+      renderVitality();
       renderReminders();
       renderReplies();
     }).catch(function(){});
@@ -1887,10 +1952,11 @@
     $("fSearch").value = "";
     $("fProvince").value = "";
     $("fTier").value = "";
+    $("fVitality").value = "";
     $("fStatus").value = status;
     $("fPageSize").value = "25";
     var t = T.sellers;
-    t.search = ""; t.provinces = []; t.tier = ""; t.statuses = [status];
+    t.search = ""; t.provinces = []; t.tier = ""; t.vitality = ""; t.statuses = [status];
     t.order_by = "score"; t.order = "desc"; t.offset = 0; t.limit = 25;
     showView("sellers");
     loadTable("sellers");
@@ -1990,7 +2056,7 @@
   });
 
   $("fSearch").addEventListener("input", function(){ T.sellers.offset = 0; debounce(loadTable, "sellers"); });  $("rSearch").addEventListener("input", function(){ T.rejected.offset = 0; debounce(loadTable, "rejected"); });
-  ["fStatus","fCategory","fProvince","fTier"].forEach(function(id){
+  ["fStatus","fCategory","fProvince","fTier","fVitality"].forEach(function(id){
     $(id).addEventListener("change", function(){ T.sellers.offset = 0; loadTable("sellers"); });
   });
   $("fPageSize").addEventListener("change", function(){
@@ -2000,9 +2066,9 @@
   });
   $("btnReset").addEventListener("click", function(){
     $("fSearch").value = ""; $("fStatus").value = ""; $("fProvince").value = "";
-    $("fTier").value = ""; $("fPageSize").value = "50"; $("fCategory").value = "";
+    $("fTier").value = ""; $("fVitality").value = ""; $("fPageSize").value = "50"; $("fCategory").value = "";
     var t = T.sellers;
-    t.search = ""; t.statuses = []; t.provinces = []; t.tier = ""; t.categories = [];
+    t.search = ""; t.statuses = []; t.provinces = []; t.tier = ""; t.vitality = ""; t.categories = [];
     t.offset = 0; t.order_by = "score"; t.order = "desc"; t.limit = 50;
     document.querySelectorAll("#view-sellers th .arrow").forEach(function(a){ a.remove(); });
     loadTable("sellers");
@@ -2050,8 +2116,9 @@
   $("btnQueue").addEventListener("click", function(){
     $("fSearch").value = ""; $("fProvince").value = ""; $("fTier").value = "";
     $("fStatus").value = "new"; $("fPageSize").value = "25"; $("fCategory").value = "";
+    $("fVitality").value = "";
     var t = T.sellers;
-    t.search = ""; t.provinces = []; t.tier = ""; t.statuses = ["new"]; t.categories = [];
+    t.search = ""; t.provinces = []; t.tier = ""; t.statuses = ["new"]; t.categories = []; t.vitality = "";
     t.order_by = "score"; t.order = "desc"; t.offset = 0; t.limit = 25;
     loadTable("sellers");
     toast("Показаны те, кому ещё не писали, по убыванию оценки", "ok");

@@ -133,6 +133,7 @@ class SellersApi:
     def sellers(self, query: dict) -> dict:
         """Список продавцов с фильтрами и пагинацией."""
         from src.crm.store import REPLY_CATEGORY_LABELS, STATUS_LABELS, VERIFY_LABELS
+        from src.crm.vitality import vitality_payload
 
         try:
             limit = min(max(int(query.get("limit", "100")), 1), 1000)
@@ -155,9 +156,13 @@ class SellersApi:
         categories = multi("category")
         verified_only = query.get("verified_only", "1") not in ("0", "false", "no")
 
+        # Живость: фильтр «только молчуны / только отвечающие»
+        vitality = (query.get("vitality") or "").strip()
+        vitality = vitality if vitality in ("replies", "silent") else None
+
         store = self.store()
         kwargs = dict(statuses=statuses, provinces=provinces, search=search, tiers=tiers,
-                      reply_categories=categories)
+                      reply_categories=categories, vitality=vitality)
         rows = store.list_sellers(
             verified_only=verified_only,
             order_by=order_by,
@@ -174,6 +179,10 @@ class SellersApi:
             item = dict(row)
             # Сколько ещё витрин у той же компании — подсказка в интерфейсе
             item["same_company"] = companies.get(item.get("uscc") or "", 1)
+            # Живость: готовый срез для колонки (числа честные, из базы)
+            item["vitality"] = vitality_payload(
+                int(item.get("reviews_seen") or 0), int(item.get("replies_seen") or 0)
+            )
             payload.append(item)
 
         return {
@@ -203,6 +212,7 @@ class SellersApi:
             provinces=multi("province"),
             tiers=multi("tier"),
             reply_categories=multi("category"),
+            vitality=(query.get("vitality") or "").strip() or None,
             search=query.get("search", ""),
             order_by=query.get("order_by", "score"),
             descending=query.get("order", "desc").lower() != "asc",
@@ -224,11 +234,20 @@ class SellersApi:
             ("sample_product_url", "Товар"),
         ]
         # BOM и точка с запятой: файл открывают в Excel с русской локалью
+        from src.crm.vitality import CAT_UNKNOWN, vitality_payload
+
         buffer = io.StringIO()
         writer = csv.writer(buffer, delimiter=";")
-        writer.writerow([title for _, title in columns])
+        writer.writerow([title for _, title in columns] + ["Живость"])
         for row in rows:
-            writer.writerow([row[key] for key, _ in columns])
+            v = vitality_payload(int(row["reviews_seen"] or 0), int(row["replies_seen"] or 0))
+            if v["seen"] <= 0:
+                vitality_text = ""
+            elif v["category"] == CAT_UNKNOWN:
+                vitality_text = "мало данных"
+            else:
+                vitality_text = f'{v["label"]} {v["replies"]}/{v["seen"]}'
+            writer.writerow([row[key] for key, _ in columns] + [vitality_text])
         return "\ufeff" + buffer.getvalue()
 
     def detail(self, seller_id: str) -> dict:
@@ -1671,6 +1690,8 @@ class Handler(BaseHTTPRequestHandler):
                 "stage_counts": store.stage_counts(),
                 "stage_labels": store.STAGE_LABELS,
                 "reminders": store.reminders(days=3, limit=12),
+                # Живость продавцов: кто отвечает на отзывы, кто молчит
+                "vitality_counts": store.vitality_counts(),
             })
         if path == "/api/seller/detail":
             seller_id = self._query().get("seller_id", "")

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from ..outreach.scoring import SellerMetrics
+from .vitality import SQL_VITALITY_ORDER, SQL_VITALITY_REPLIES, SQL_VITALITY_SILENT
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,13 @@ CRM_COLUMNS = {
     "reply_at": "TEXT NOT NULL DEFAULT ''",
     # Когда продавец передан менеджеру. Пусто = бот ещё ведёт.
     "handed_to_manager_at": "TEXT NOT NULL DEFAULT ''",
+    # Живость продавца (src/crm/review_sample.py): сколько отзывов рассмотрено
+    # в сэмплах с карточек и у скольких был ответ магазина. Считается
+    # кумулятивно — сэмплы с разных карточек одного продавца складываются.
+    "reviews_seen": "INTEGER NOT NULL DEFAULT 0",
+    "replies_seen": "INTEGER NOT NULL DEFAULT 0",
+    # Когда сэмпл отзывов приходил последний раз — свежесть данных о живости.
+    "reviews_checked_at": "TEXT NOT NULL DEFAULT ''",
 }
 
 # Журнал отправок. В sellers.message_sent хранится только последнее сообщение
@@ -178,7 +186,10 @@ CREATE TABLE IF NOT EXISTS sellers (
     metrics_at          TEXT NOT NULL DEFAULT '',
     reply_category      TEXT NOT NULL DEFAULT '',
     reply_at            TEXT NOT NULL DEFAULT '',
-    handed_to_manager_at TEXT NOT NULL DEFAULT ''
+    handed_to_manager_at TEXT NOT NULL DEFAULT '',
+    reviews_seen        INTEGER NOT NULL DEFAULT 0,
+    replies_seen        INTEGER NOT NULL DEFAULT 0,
+    reviews_checked_at  TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -243,7 +254,8 @@ SELECT_FIELDS = (
     "orders, reviews, months_on_ozon, rating, score, is_chinese, verified_by, "
     "seller_profile_url, sample_product_url, status, notes, attempts, last_attempt_at, "
     "last_error, message_sent, first_seen_at, last_seen_at, product_count, chinese_reasons, "
-    "sent_at, metrics_at, stage, reply_category, reply_at, handed_to_manager_at"
+    "sent_at, metrics_at, stage, reply_category, reply_at, handed_to_manager_at, "
+    "reviews_seen, replies_seen, reviews_checked_at"
 )
 
 
@@ -396,6 +408,7 @@ class SellerStore:
         search: str = "",
         tiers: Optional[Sequence[str]] = None,
         reply_categories: Optional[Sequence[str]] = None,
+        vitality: Optional[str] = None,
     ) -> Tuple[str, List]:
         """Собирает WHERE и параметры для выборки продавцов.
 
@@ -425,6 +438,13 @@ class SellerStore:
             where.append(f"reply_category IN ({','.join('?' * len(reply_categories))})")
             params.extend(reply_categories)
 
+        # Живость: SQL-эквиваленты порогов из src/crm/vitality.py (без
+        # параметров: условия целочисленные, инъекции там неоткуда взяться).
+        if vitality == "replies":
+            where.append(f"({SQL_VITALITY_REPLIES})")
+        elif vitality == "silent":
+            where.append(f"({SQL_VITALITY_SILENT})")
+
         if search:
             where.append(
                 "(shop_name LIKE ? OR company_name LIKE ? OR uscc LIKE ? "
@@ -448,6 +468,7 @@ class SellerStore:
         provinces: Optional[Sequence[str]] = None,
         tiers: Optional[Sequence[str]] = None,
         reply_categories: Optional[Sequence[str]] = None,
+        vitality: Optional[str] = None,
     ) -> List[sqlite3.Row]:
         """Список продавцов для дашборда.
 
@@ -459,6 +480,8 @@ class SellerStore:
             "shop_name", "company_name", "province", "status", "last_seen_at",
             # Дата последнего входящего: сортировка «кто ответил»
             "last_reply_at",
+            # Живость: по сглаженной доле ответов, без сэмпла — вниз списка
+            "vitality",
         }
         order_by = order_by if order_by in allowed_order else "score"
 
@@ -469,8 +492,14 @@ class SellerStore:
             search=search,
             tiers=tiers,
             reply_categories=reply_categories,
+            vitality=vitality,
         )
-        order_sql = "last_reply_at" if order_by == "last_reply_at" else order_by
+        if order_by == "last_reply_at":
+            order_sql = "last_reply_at"
+        elif order_by == "vitality":
+            order_sql = SQL_VITALITY_ORDER
+        else:
+            order_sql = order_by
         # База в подзапросе: WHERE остаётся однозначным (без префиксов), а JOIN
         # с сообщениями добавляет last_reply_at поверх отфильтрованных строк.
         sql = (
@@ -495,6 +524,7 @@ class SellerStore:
         provinces: Optional[Sequence[str]] = None,
         tiers: Optional[Sequence[str]] = None,
         reply_categories: Optional[Sequence[str]] = None,
+        vitality: Optional[str] = None,
     ) -> int:
         """Число записей под теми же условиями, что и list_sellers."""
         where, params = self._build_filter(
@@ -504,6 +534,7 @@ class SellerStore:
             search=search,
             tiers=tiers,
             reply_categories=reply_categories,
+            vitality=vitality,
         )
         with self._connect() as conn:
             return int(conn.execute(f"SELECT COUNT(*) AS n FROM sellers{where}", params).fetchone()["n"])
@@ -656,6 +687,67 @@ class SellerStore:
                 )
                 seen += cur.rowcount
         return seen
+
+    def record_review_sample(self, seller_id: str, reviews_seen: int, replies_seen: int) -> bool:
+        """Прибавляет сэмпл отзывов к живости продавца (кумулятивно).
+
+        Сэмплы приходят с карточек товаров во время сбора, продавец встречается
+        в нескольких товарах и прогонах — поэтому именно прибавляем, а не
+        перезаписываем. updated_at не трогаем: живость — фоновая метрика, а не
+        правка продавца, и зря двигать «обновлён» не стоит. Возвращает True,
+        если продавец найден (для незнакомых сэмпл бросается — записывать
+        некуда, попадёт в следующий прогон).
+        """
+        if reviews_seen <= 0 and replies_seen <= 0:
+            return False
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE sellers SET "
+                "reviews_seen = reviews_seen + ?, "
+                "replies_seen = replies_seen + ?, "
+                "reviews_checked_at = ? "
+                "WHERE seller_id = ?",
+                (max(0, reviews_seen), max(0, replies_seen), _now(), seller_id),
+            )
+            found = cur.rowcount > 0
+        if found and (reviews_seen or replies_seen):
+            logger.debug(
+                f"Живость {seller_id}: +{reviews_seen} отзывов, +{replies_seen} ответов"
+            )
+        return found
+
+    def vitality_counts(self) -> dict:
+        """Сколько подтверждённых продавцов в каждой категории живости.
+
+        Считает по тем же SQL-порогам, что и фильтр таблицы, и по тому же
+        множеству (USCC + склад) — чтобы «Обзор» не расходился с таблицей.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT CASE "
+                f"  WHEN NOT ({SQL_VITALITY_REPLIES}) AND NOT ({SQL_VITALITY_SILENT}) "
+                f"  THEN 'mixed' "
+                f"  WHEN ({SQL_VITALITY_REPLIES}) THEN 'replies' "
+                f"  ELSE 'silent' END AS cat, "
+                f"COUNT(*) AS n FROM sellers WHERE verified_by IN (?, ?) "
+                f"AND reviews_seen >= 3 GROUP BY cat",
+                (VERIFY_USCC, VERIFY_WAREHOUSE),
+            ).fetchall()
+            sampled = int(conn.execute(
+                "SELECT COUNT(*) AS n FROM sellers "
+                "WHERE verified_by IN (?, ?) AND reviews_seen >= 3",
+                (VERIFY_USCC, VERIFY_WAREHOUSE),
+            ).fetchone()["n"])
+            verified = int(conn.execute(
+                "SELECT COUNT(*) AS n FROM sellers WHERE verified_by IN (?, ?)",
+                (VERIFY_USCC, VERIFY_WAREHOUSE),
+            ).fetchone()["n"])
+        counts = {r["cat"]: int(r["n"]) for r in rows}
+        counts["sampled"] = sampled
+        # «Мало данных» — все подтверждённые, по кому сэмпла ещё не хватает
+        counts["unknown"] = max(0, verified - sampled)
+        counts["verified"] = verified
+        return counts
 
     # --- Правки из дашборда ----------------------------------------------
 

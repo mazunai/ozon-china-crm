@@ -37,6 +37,7 @@ from .store import (
     VERIFY_WAREHOUSE,
     SellerStore,
 )
+from .review_sample import sample_from_card
 from .verify import build_widget_request, find_delivery_node, verify_by_warehouse
 from ..outreach.scoring import SellerMetrics, score_all
 from ..parsers.chinese_filter import (
@@ -77,6 +78,8 @@ class HarvestStats:
     # (метрики свежие) — и товары, взятые из кэша вместо карточек.
     sellers_skipped: int = 0
     cards_cached: int = 0
+    # Продавцам, чьи карточки открывались, снят сэмпл отзывов (живость)
+    vitality_samples: int = 0
     requests: int = 0
     cancelled: bool = False
     errors: List[str] = field(default_factory=list)
@@ -87,6 +90,8 @@ class HarvestStats:
             extra += f", свежих пропущено={self.sellers_skipped}"
         if self.cards_cached:
             extra += f", карточек по кэшу={self.cards_cached}"
+        if self.vitality_samples:
+            extra += f", сэмплов живости={self.vitality_samples}"
         return (
             f"страниц={self.pages}, товаров={self.products}, "
             f"продавцов={self.sellers_found} "
@@ -586,6 +591,11 @@ class ChinaSellerHarvester:
         # Известные продавцы из базы: seller_id -> мета (для пропуска свежих
         # и имён магазинов при попадании в кэш товаров).
         self._known: Dict[str, dict] = {}
+        # Живость: сэмплы отзывов, снятые с открытых карточек этого прохода.
+        # Пишутся в базу после того, как продавец там точно появился; одному
+        # продавцу — один сэмпл за проход (карточек у него может быть много).
+        self._vitality_pending: Dict[str, Tuple[int, int]] = {}
+        self._vitality_sampled: Set[str] = set()
 
     def cancelled(self) -> bool:
         """Запрошена ли отмена. Проверяется в каждом цикле обхода."""
@@ -711,6 +721,11 @@ class ChinaSellerHarvester:
             if not seller_id:
                 continue
 
+            # Карточка уже открыта — с неё же снимаем сэмпл отзывов для
+            # живости продавца (+1 запрос к странице отзывов, максимум
+            # пара якорных). Темп держит общая адаптивная пауза клиента.
+            self._sample_vitality(seller_id, data)
+
             record = sellers.setdefault(seller_id, {
                 "shop_name": shop_name, "products": [], "delivery_node": None,
             })
@@ -730,6 +745,31 @@ class ChinaSellerHarvester:
                 self._log(f"Обработано товаров: {index}/{len(product_ids)}, "
                           f"продавцов {len(sellers)}")
         return sellers
+
+    def _sample_vitality(self, seller_id: str, card_json: dict) -> None:
+        """Снимает сэмпл отзывов с открытой карточки (живость продавца).
+
+        Один сэмпл на продавца за проход: у продавца много карточек, и каждая
+        отдала бы те же тридцать отзывов. Сэмпл копится в буфере и попадает
+        в базу после того, как продавец там точно появился (см. flush).
+        """
+        if seller_id in self._vitality_sampled:
+            return
+        self._vitality_sampled.add(seller_id)
+        seen, replies = sample_from_card(self.client, card_json)
+        if seen > 0:
+            self._vitality_pending[seller_id] = (seen, replies)
+
+    def _flush_vitality(self) -> None:
+        """Записывает накопленные сэмплы в базу (кумулятивно по продавцу)."""
+        if self.store is None or not self._vitality_pending:
+            return
+        recorded = 0
+        for seller_id, (seen, replies) in self._vitality_pending.items():
+            if self.store.record_review_sample(seller_id, seen, replies):
+                recorded += 1
+        self.stats.vitality_samples += recorded
+        self._vitality_pending = {}
 
     def _check_warehouse(self, node: Optional[dict], article: str) -> Optional[dict]:
         """Проверяет склад продавца через виджет доставки."""
@@ -909,6 +949,10 @@ class ChinaSellerHarvester:
             score_all(buffer)
             added_total += self.store.add_sellers(buffer)
             buffer = []
+            # Продавцы из порции уже в базе — сэмплы живости теперь кому-то
+            # записывать. Сюда же попадают сэмплы известных продавцов,
+            # накопившиеся к этому моменту.
+            self._flush_vitality()
 
         for index, (seller_id, record) in enumerate(sellers.items(), 1):
             if self.cancelled():
@@ -938,6 +982,9 @@ class ChinaSellerHarvester:
                 self._log(f"Проверено продавцов: {index}/{len(sellers)}")
 
         flush(force=True)
+        # Хвост сэмпла: продавцы, пропущенные по свежим метрикам, в порции
+        # не попадали, а их сэмплы уже сняты с карточек.
+        self._flush_vitality()
 
         if self.store is not None and not self.cancelled():
             if seen:

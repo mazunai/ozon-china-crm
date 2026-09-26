@@ -242,11 +242,23 @@
   .drawer-fields .muted{grid-column:1/-1}
   .drawer.open{transform:translateX(0)}
   .drawer h3{margin:0 0 4px;font-size:16px}
-  .drawer dl{display:grid;grid-template-columns:150px 1fr;gap:6px 12px;margin:14px 0;font-size:13px}
+  .drawer dl{display:grid;grid-template-columns:150px 1fr;gap:5px 12px;margin:12px 0;font-size:13px}
   .drawer dt{color:var(--dim)}
   .drawer dd{margin:0;word-break:break-word}
   .reasons{background:var(--card2);border-radius:9px;padding:10px;font-size:12px;
     color:var(--dim);white-space:pre-wrap;line-height:1.6}
+  /* История переписки: компактные пузыри с цветной кромкой по направлению */
+  .msg{background:var(--card2);border-radius:10px;padding:8px 11px;margin-top:6px;
+    border-left:2px solid var(--line)}
+  .msg-sent{border-left-color:var(--ok)}
+  .msg-received{border-left-color:var(--purple)}
+  .msg-error,.msg-failed{border-left-color:var(--err)}
+  .msg-head{font-size:12px;color:var(--dim);margin-bottom:3px}
+  .msg-mark{font-weight:600;color:var(--text)}
+  .msg-date{opacity:.75}
+  .msg-err{color:var(--err)}
+  .msg-text{font-size:13px;color:var(--text);line-height:1.5;white-space:pre-wrap;
+    word-break:break-word}
   .overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:55;display:none}
   .overlay.open{display:block}
   .toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;
@@ -1307,7 +1319,7 @@
           html += '<div class="muted" style="margin-top:12px">Последнее отправленное сообщение</div>' +
             '<div class="reasons">' + esc(d.message_sent) + "</div>";
         }
-        html += '<div id="historyBox" style="margin-top:14px"></div>';
+        html += '<div id="historyBox" style="margin-top:10px"></div>';
         // CRM: категория ответа, стадия сделки и ответ продавцу прямо из карточки
         var catOptions = Object.keys(REPLY_LABELS).map(function(key){
           return '<option value="' + key + '"' + (key === d.reply_category ? " selected" : "") + ">" +
@@ -1335,7 +1347,7 @@
           '<button class="primary" id="btnReplySend">Отправить ответ</button>' +
           '<span class="muted" id="replyState">уходит в чат Ozon продавца</span>' +
         "</div>";
-        html += '<div class="row" style="margin-top:16px">' +
+        html += '<div class="row" style="margin-top:12px">' +
           '<a href="' + esc(profile) + '" target="_blank" rel="noopener">Профиль на Ozon ↗</a>' +
           (d.sample_product_url ? ' · <a href="' + esc(d.sample_product_url) +
             '" target="_blank" rel="noopener">товар ↗</a>' : "") +
@@ -1408,16 +1420,13 @@
                 var mark = m.result === "sent" ? "отправлено"
                   : m.result === "received" ? "ответил"
                   : "не доставлено";
-                var color = m.result === "sent" ? "var(--ok)"
-                  : m.result === "received" ? "var(--purple)"
-                  : "var(--err)";
                 var cat = (m.result === "received" && m.category)
-                  ? ' · ' + esc(REPLY_LABELS[m.category] || m.category) : "";
-                return '<div class="reasons" style="margin-top:6px">' +
-                  '<span style="color:' + color + '">' + mark + "</span>" + cat + " · " +
-                  esc(fmtDate(m.sent_at)) +
-                  (m.error ? ' <span style="color:var(--err)">' + esc(m.error) + "</span>" : "") +
-                  '<div style="margin-top:4px;color:var(--text)">' + esc(m.text.slice(0, 400)) + "</div></div>";
+                  ? " · " + esc(REPLY_LABELS[m.category] || m.category) : "";
+                return '<div class="msg msg-' + esc(m.result) + '">' +
+                  '<div class="msg-head"><span class="msg-mark">' + mark + "</span>" + cat +
+                  '<span class="msg-date">' + esc(fmtDate(m.sent_at)) + "</span>" +
+                  (m.error ? ' <span class="msg-err">' + esc(m.error) + "</span>" : "") + "</div>" +
+                  '<div class="msg-text">' + esc(m.text.slice(0, 400)) + "</div></div>";
               }).join("");
           }).catch(function(){});
       })

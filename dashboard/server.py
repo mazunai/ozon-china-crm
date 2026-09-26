@@ -668,6 +668,10 @@ class NightHarvest:
             "current_page": current_page,
             "chunks_done": int(state.get("chunks_done") or 0),
             "updated_at": state.get("updated_at") or "",
+            # Чем кончился последний чанк и сколько сбоев подряд: по этому
+            # «Обновить» при незапущенном сборе показывает не заглушки, а статус
+            "last_result": state.get("last_result") or "",
+            "failures": int(state.get("failures") or 0),
             "log_updated_at": log_updated,
             "days": {
                 "products": int(totals.get("products") or 0),
@@ -678,7 +682,8 @@ class NightHarvest:
             "log": log_lines,
         }
 
-    def start(self, chunk_pages: int, until: str, pause: float, refresh_days: int) -> None:
+    def start(self, chunk_pages: int, until: str, pause: float, refresh_days: int,
+              url: str = "") -> None:
         if self.running():
             raise ValueError("Ночной сбор уже идёт")
         if HARVEST.status().get("running"):
@@ -699,6 +704,11 @@ class NightHarvest:
             "--pause", str(pause),
             "--refresh-days", str(refresh_days),
         ]
+        # Ссылку передаём только заданную: пусто — раздел по умолчанию скрипта.
+        # Так ночной сбор может идти по любому разделу или поиску, не только
+        # по «Товарям из Китая».
+        if url:
+            command += ["--url", url]
         self.LOG_DIR.mkdir(parents=True, exist_ok=True)
         with self._log_path().open("a", encoding="utf-8") as handle:
             subprocess.Popen(
@@ -715,6 +725,84 @@ class NightHarvest:
 
 
 NIGHT = NightHarvest()
+
+
+# --- Сохраняемые настройки сборов -------------------------------------------
+# Обычный и ночной сбор хранят свои ссылки и параметры в data/: файл не в git,
+# деплой data/ не трогает — на каждой машине свои настройки и они переживают
+# перезапуск дашборда. Пустая ссылка = раздел по умолчанию («Товары из Китая»).
+HARVEST_SETTINGS_FILE = DATA_DIR / "harvest_settings.json"
+
+HARVEST_SETTINGS_DEFAULTS = {
+    "harvest": {"url": "", "pages": 50, "delay": 0.7},
+    "night": {"url": "", "chunk_pages": 10, "until": "08:00", "pause": 180, "refresh_days": 7},
+}
+
+
+def load_harvest_settings() -> dict:
+    """Сохранённые настройки, дополненные значениями по умолчанию."""
+    import copy
+
+    settings = copy.deepcopy(HARVEST_SETTINGS_DEFAULTS)
+    try:
+        stored = json.loads(HARVEST_SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        stored = {}
+    for section in settings:
+        if not isinstance(stored.get(section), dict):
+            continue
+        for key in settings[section]:
+            if key in stored[section]:
+                settings[section][key] = stored[section][key]
+    return settings
+
+
+def save_harvest_settings(data: dict) -> dict:
+    """Валидирует и сохраняет присланные секции (harvest и/или night).
+
+    Валидация до записи: кривое «работать до» не должно доехать до запуска
+    ночного сбора и уронить его на первом же чанке.
+    """
+    settings = load_harvest_settings()
+    for section in ("harvest", "night"):
+        incoming = (data or {}).get(section)
+        if not isinstance(incoming, dict):
+            continue
+        target = settings[section]
+        for key, default in target.items():
+            if key not in incoming:
+                continue
+            value = incoming[key]
+            try:
+                if isinstance(default, bool):
+                    target[key] = bool(value)
+                elif isinstance(default, int):
+                    target[key] = int(value)
+                elif isinstance(default, float):
+                    target[key] = float(value)
+                else:
+                    target[key] = str(value).strip()
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Неверное значение {section}.{key}: {value!r}") from exc
+
+    harvest, night = settings["harvest"], settings["night"]
+    if harvest["url"] and "ozon.ru" not in harvest["url"]:
+        raise ValueError("Ссылка обычного сбора должна вести на ozon.ru")
+    harvest["pages"] = min(max(harvest["pages"], 1), 500)
+    harvest["delay"] = min(max(harvest["delay"], 0.0), 10.0)
+
+    if night["url"] and "ozon.ru" not in night["url"]:
+        raise ValueError("Ссылка ночного сбора должна вести на ozon.ru")
+    night["chunk_pages"] = min(max(night["chunk_pages"], 1), 100)
+    night["pause"] = min(max(night["pause"], 5), 3600)
+    night["refresh_days"] = min(max(night["refresh_days"], 0), 365)
+    if night["until"] and not re.match(r"^\d{1,2}:\d{2}$", night["until"]):
+        raise ValueError(f"«Работать до» должно быть ЧЧ:ММ, а не «{night['until']}»")
+
+    HARVEST_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    HARVEST_SETTINGS_FILE.write_text(
+        json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+    return settings
 
 
 class InboxAuto:
@@ -1732,6 +1820,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({
                 **HARVEST.status(),
                 "default_url": CHINA_SECTION_URL,
+                # Сохранённые ссылки и параметры обоих сборов: интерфейс
+                # подставляет их в поля при открытии вкладки
+                "settings": load_harvest_settings(),
             })
         if path == "/api/night":
             return self._send_json(NIGHT.status())
@@ -2038,11 +2129,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json({"error": "Работает воркер Ozon — сначала остановите его"}, 400)
             try:
                 delay = data.get("delay")
+                harvest_url = str(data.get("url", "")).strip()
+                pages = int(data.get("pages") or 10)
                 HARVEST.start(
-                    str(data.get("url", "")).strip(),
-                    int(data.get("pages") or 10),
+                    harvest_url,
+                    pages,
                     delay=float(delay) if delay is not None else None,
                 )
+                # Что запустили — то и запоминаем: поля в интерфейсе должны
+                # пережить перезапуск браузера. Ошибка сохранения не срывает
+                # уже запущенный сбор.
+                try:
+                    saved = {"url": harvest_url, "pages": pages}
+                    if delay is not None:
+                        saved["delay"] = float(delay)
+                    save_harvest_settings({"harvest": saved})
+                except ValueError:
+                    pass
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
             except Exception as exc:                      # noqa: BLE001
@@ -2053,16 +2156,29 @@ class Handler(BaseHTTPRequestHandler):
             HARVEST.stop()
             return self._send_json({"ok": True})
 
+        if path == "/api/harvest/settings":
+            try:
+                return self._send_json({"ok": True, "settings": save_harvest_settings(data)})
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+
         if path == "/api/night/start":
             if WORKERS.running("ozon"):
                 return self._send_json({"error": "Работает воркер Ozon — сначала остановите его"}, 400)
             try:
-                NIGHT.start(
-                    chunk_pages=max(1, min(int(data.get("chunk_pages") or 10), 100)),
-                    until=str(data.get("until") or "08:00").strip() or "08:00",
-                    pause=max(5.0, min(float(data.get("pause") or 180), 3600.0)),
-                    refresh_days=max(0, min(int(data.get("refresh_days") or 7), 365)),
-                )
+                night_url = str(data.get("url") or "").strip()
+                chunk = max(1, min(int(data.get("chunk_pages") or 10), 100))
+                until = str(data.get("until") or "08:00").strip() or "08:00"
+                pause = max(5.0, min(float(data.get("pause") or 180), 3600.0))
+                refresh_days = max(0, min(int(data.get("refresh_days") or 7), 365))
+                # Настройки валидируются и сохраняются ДО запуска: кривое
+                # «работать до» не должно запускать сбор, который упадёт сразу
+                save_harvest_settings({"night": {
+                    "url": night_url, "chunk_pages": chunk, "until": until,
+                    "pause": pause, "refresh_days": refresh_days,
+                }})
+                NIGHT.start(chunk_pages=chunk, until=until, pause=pause,
+                            refresh_days=refresh_days, url=night_url)
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
             except Exception as exc:                      # noqa: BLE001

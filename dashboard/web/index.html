@@ -583,6 +583,7 @@
         <label class="check">пауза, сек <input type="number" id="hDelay" value="0.7" min="0" max="10" step="0.1"></label>
         <button class="primary" id="btnHarvest">Собрать</button>
         <button class="ghost" id="btnHarvestStop" disabled>Остановить</button>
+        <button class="ghost" id="btnHarvestSave">Сохранить настройки</button>
         <span class="spacer"></span>
         <span class="muted" id="hPhase">—</span>
       </div>
@@ -631,13 +632,18 @@
     <div class="card">
       <h2>Ночной сбор · запуск кнопкой</h2>
       <div class="row">
+        <input type="text" id="nUrl" placeholder="ссылка на раздел для ночного сбора (пусто — «Товары из Китая»)" style="flex:1;min-width:340px">
+      </div>
+      <div class="row" style="margin-top:10px">
         <label class="check">страниц за проход <input type="number" id="nChunk" value="10" min="1" max="100"></label>
         <label class="check">работать до <input type="text" id="nUntil" value="08:00" style="min-width:72px;width:72px"></label>
         <label class="check">пауза между проходами, сек <input type="number" id="nPause" value="180" min="5" max="3600"></label>
+        <label class="check">перечитывать известных, дней <input type="number" id="nRefresh" value="7" min="0" max="365"></label>
       </div>
       <div class="row" style="margin-top:10px">
         <button class="primary" id="btnNightStart">Запустить ночной сбор</button>
         <button class="ghost" id="btnNightStop" disabled>Остановить</button>
+        <button class="ghost" id="btnNightSave">Сохранить настройки</button>
         <span class="spacer"></span>
         <span class="pill" id="nightPill">не идёт</span>
         <button class="ghost" id="btnNightRefresh">Обновить</button>
@@ -777,8 +783,8 @@
   var T = {
     sellers: {limit:50, offset:0, search:"", statuses:[], provinces:[], tier:"", vitality:"",
               categories:[], order_by:"score", order:"desc", rows:[], total:0, verified_only:true},
-    rejected:{limit:50, offset:0, search:"", statuses:[], provinces:[], tier:"none",
-              order_by:"score", order:"desc", rows:[], total:0, verified_only:false}
+    rejected:{limit:50, offset:0, search:"", statuses:[], provinces:[], tier:"none", vitality:"",
+              categories:[], order_by:"score", order:"desc", rows:[], total:0, verified_only:false}
   };
 
   function params(t){
@@ -790,9 +796,9 @@
     p.set("verified_only", t.verified_only ? "1" : "0");
     if (t.search) p.set("search", t.search);
     if (t.tier) p.set("tier", t.tier);
-    if (t.statuses.length) p.set("status", t.statuses.join(","));
-    if (t.provinces.length) p.set("province", t.provinces.join(","));
-    if (t.categories.length) p.set("category", t.categories.join(","));
+    if (t.statuses && t.statuses.length) p.set("status", t.statuses.join(","));
+    if (t.provinces && t.provinces.length) p.set("province", t.provinces.join(","));
+    if (t.categories && t.categories.length) p.set("category", t.categories.join(","));
     if (t.vitality) p.set("vitality", t.vitality);
     if (MARKETPLACE === "wb") p.set("marketplace", "wb");
     return p;
@@ -1460,13 +1466,21 @@
       kpiCard("kp-err", "Ошибок", d.errors, "записей с ошибкой");
 
     // Свежесть лога: по ней сразу видно, что сбор живёт, а не встал
-    if (n.log_updated_at) {
+    if (running && n.log_updated_at) {
       var seconds = Math.round((Date.now() - new Date(n.log_updated_at).getTime()) / 1000);
       var ago = seconds < 5 ? "только что"
         : seconds < 90 ? (seconds + " сек назад")
         : (Math.round(seconds / 60) + " мин назад");
       $("nightFresh").textContent = "Сбор пишет в лог: " + ago +
         (n.current_page ? " · идёт страница " + n.current_page : "");
+    } else if (!running) {
+      // Не идёт — «Обновить» показывает, чем кончился прошлый запуск и с чего
+      // продолжится, а не набор прочерков
+      var bits = ["не идёт"];
+      if (n.updated_at) { bits.push("последний прогресс " + fmtDate(n.updated_at)); }
+      bits.push("продолжит со страницы " + (n.next_page || 1));
+      if (n.last_result === "error") { bits.push("прошлый чанк упал с ошибкой — повторит его"); }
+      $("nightFresh").textContent = bits.join(" · ");
     } else {
       $("nightFresh").textContent = "";
     }
@@ -1496,11 +1510,16 @@
     var chunk = parseInt($("nChunk").value, 10) || 10;
     var until = ($("nUntil").value || "").trim() || "08:00";
     var pause = parseFloat($("nPause").value) || 180;
-    if (!confirm("Запустить ночной сбор?\n\nПойдёт порциями по " + chunk +
+    var refresh = parseInt($("nRefresh").value, 10);
+    if (isNaN(refresh)) { refresh = 7; }
+    var url = $("nUrl").value.trim();
+    if (!confirm("Запустить ночной сбор?\n\nРаздел: " + (url || "«Товары из Китая» (по умолчанию)") +
+                 "\nПойдёт порциями по " + chunk +
                  " страниц, пауза между порциями " + pause + " сек, работать до " + until +
                  ".\nОстановить можно кнопкой в любой момент.")) { return; }
     $("btnNightStart").disabled = true;
-    postJson("/api/night/start", {chunk_pages: chunk, until: until, pause: pause})
+    postJson("/api/night/start", {chunk_pages: chunk, until: until, pause: pause,
+                                  refresh_days: refresh, url: url})
       .then(function(res){
         toast("Ночной сбор запущен", "ok");
         renderNight(res);
@@ -1519,6 +1538,28 @@
   });
 
   $("btnNightRefresh").addEventListener("click", function(){ loadNight(); });
+
+  // Сохранить настройки без запуска: ссылки и параметры переживают перезапуск
+  // дашборда и деплой (файл лежит в data/, на каждой машине свои).
+  $("btnHarvestSave").addEventListener("click", function(){
+    postJson("/api/harvest/settings", {harvest: {
+      url: $("hUrl").value.trim(),
+      pages: parseInt($("hPages").value, 10) || 50,
+      delay: parseFloat($("hDelay").value) || 0.7
+    }}).then(function(){ toast("Настройки сбора сохранены", "ok"); })
+      .catch(function(err){ toast("Не удалось сохранить: " + err.message, "err"); });
+  });
+  $("btnNightSave").addEventListener("click", function(){
+    var refresh = parseInt($("nRefresh").value, 10);
+    postJson("/api/harvest/settings", {night: {
+      url: $("nUrl").value.trim(),
+      chunk_pages: parseInt($("nChunk").value, 10) || 10,
+      until: ($("nUntil").value || "").trim() || "08:00",
+      pause: parseFloat($("nPause").value) || 180,
+      refresh_days: isNaN(refresh) ? 7 : refresh
+    }}).then(function(){ toast("Настройки ночного сбора сохранены", "ok"); })
+      .catch(function(err){ toast("Не удалось сохранить: " + err.message, "err"); });
+  });
 
   /* ---------- WB-воркер: отдельный процесс, отдельная база ---------- */
   var workerWasRunning = false;
@@ -2386,8 +2427,20 @@
 
   /* ---------- запуск ---------- */
   fetch("/api/harvest").then(function(r){ return r.json(); }).then(function(h){
-    if (h.default_url) { $("hUrl").value = h.default_url; }
-    if (h.pages) { $("hPages").value = h.pages; }
+    // Поля собираем из сохранённых настроек: то, что запускали в прошлый раз,
+    // должно стоять в полях и наутро. Пустая ссылка в настройках = раздел
+    // по умолчанию — показываем её явно, чтобы было видно, что соберётся.
+    var st = h.settings || {};
+    var hs = st.harvest || {};
+    $("hUrl").value = hs.url || h.default_url || "";
+    if (hs.pages) { $("hPages").value = hs.pages; }
+    if (hs.delay !== undefined && hs.delay !== null) { $("hDelay").value = hs.delay; }
+    var ns = st.night || {};
+    $("nUrl").value = ns.url || h.default_url || "";
+    if (ns.chunk_pages) { $("nChunk").value = ns.chunk_pages; }
+    if (ns.until) { $("nUntil").value = ns.until; }
+    if (ns.pause) { $("nPause").value = ns.pause; }
+    if (ns.refresh_days !== undefined && ns.refresh_days !== null) { $("nRefresh").value = ns.refresh_days; }
     applyHarvest(h);
   }).catch(function(){});
 

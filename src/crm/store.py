@@ -844,6 +844,24 @@ class SellerStore:
             ).fetchall()
         return [{"date": r["d"], "count": int(r["n"])} for r in rows]
 
+    def replies_recent(self, limit: int = 10) -> List[dict]:
+        """Реальные ответы продавцов (входящие) — свежие сверху.
+
+        Для карточки «Ответили» на Обзоре: видно КТО ответил и что написал,
+        а не только цифра. Только result='received' — проверенные входящие
+        из чатов, а не ручные отметки статуса.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT m.seller_id, m.text, m.sent_at, "
+                "       COALESCE(s.shop_name, '') AS shop_name "
+                "FROM messages m LEFT JOIN sellers s ON s.seller_id = m.seller_id "
+                "WHERE m.result = 'received' "
+                "ORDER BY m.id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def received_by_day(self, days: int = 15) -> List[dict]:
         """Ответы продавцов по дням (result='received') — для графика."""
         from datetime import timedelta

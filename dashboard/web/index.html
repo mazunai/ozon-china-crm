@@ -301,6 +301,11 @@
       <div id="ovFunnel"><div class="muted">Загрузка…</div></div>
     </div>
     <div class="card">
+      <h2>Ответили <span class="badge ok" id="ovRepliesCount"></span></h2>
+      <div id="ovReplies"><div class="muted">Загрузка…</div></div>
+      <div class="muted" style="margin-top:8px">Входящие из чатов Ozon — только реальные ответы. Клик по строке откроет карточку продавца, ответить можно прямо там.</div>
+    </div>
+    <div class="card">
       <h2>Пора напомнить</h2>
       <div id="ovReminders"><div class="muted">Загрузка…</div></div>
       <div class="muted" style="margin-top:8px">Ответили и молчат дольше 3 дней. Клик — откроются «ответившие».</div>
@@ -1391,6 +1396,35 @@
     }).join("");
   }
 
+  // «Ответили»: реальные входящие из чатов — кто ответил и что написал.
+  function renderReplies(){
+    var rows = STATS.replies || [];
+    $("ovRepliesCount").textContent = rows.length ? "(" + rows.length + ")" : "";
+    if (!rows.length) {
+      $("ovReplies").innerHTML = '<div class="muted">Ответов пока нет — здесь появится первый, как только продавец напишет.</div>';
+      return;
+    }
+    $("ovReplies").innerHTML = rows.map(function(m){
+      return '<div class="recent-item" data-reply-seller="' + esc(m.seller_id) + '" style="cursor:pointer">' +
+        '<span class="st-dot st-replied"></span>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div class="recent-shop">' + esc(m.shop_name || m.seller_id) + "</div>" +
+          '<div class="recent-text">' + esc(String(m.text || "").replace(/^\[входящее[^\]]*\]\s*/, "").slice(0, 160)) + "</div>" +
+        "</div>" +
+        '<span class="recent-when">' + esc(fmtDate(m.sent_at)) + " · открыть ↗</span>" +
+      "</div>";
+    }).join("");
+  }
+
+  // Клик по ответившему — сразу его карточка, там же поле «Ответить»
+  document.addEventListener("click", function(ev){
+    var item = closestTo(ev.target, "[data-reply-seller]");
+    if (item) {
+      showView("sellers");
+      openDrawer(item.dataset.replySeller);
+    }
+  });
+
   // «Пора напомнить»: ответили и молчат дольше 3 дней (список с сервера).
   function renderReminders(){
     var rows = STATS.reminders || [];
@@ -1557,11 +1591,13 @@
       STATS.stageCounts = d.stage_counts || {};
       STATS.stageLabels = d.stage_labels || {};
       STATS.reminders = d.reminders || [];
+      STATS.replies = d.replies_recent || [];
       renderOverview();
       renderCharts();
       renderRecent();
       renderFunnel();
       renderReminders();
+      renderReplies();
     }).catch(function(){});
   }
 

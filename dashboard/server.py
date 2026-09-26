@@ -1495,6 +1495,7 @@ class Handler(BaseHTTPRequestHandler):
                 "status_counts": store.status_counts(),
                 "sent_by_day": store.sent_by_day(days=15),
                 "received_by_day": store.received_by_day(days=15),
+                "replies_recent": store.replies_recent(limit=10),
                 "recent": store.recent_messages(limit=14),
                 "status_labels": STATUS_LABELS,
                 # CRM: стадии сделки и «пора напомнить» — кто ответил и замолчал

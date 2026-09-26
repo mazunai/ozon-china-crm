@@ -140,6 +140,16 @@
     color:var(--sc);border:1px solid color-mix(in srgb,var(--sc) 40%,transparent);
     background:color-mix(in srgb,var(--sc) 10%,transparent);white-space:nowrap}
   .st-chip .st-dot{margin-right:5px;width:7px;height:7px}
+  /* категории ответов: заинтересованные и позитив — зелёный/фиолетовый,
+     негатив — красный, остальное — нейтральный серый */
+  .rc-positive{--sc:#34d399}
+  .rc-interested{--sc:#a78bfa}
+  .rc-needs_info{--sc:#60a5fa}
+  .rc-negative{--sc:#f87171}
+  .rc-neutral{--sc:#94a3b8}
+  .rc-other{--sc:#94a3b8}
+  select.sel-category{font-size:12px;padding:4px 6px}
+  select.sel-category option{color:var(--text);background:var(--card2)}
   input.note-input{width:100%;min-width:150px;background:transparent;border-color:transparent;
     font-size:12px;padding:5px 6px}
   input.note-input:hover{border-color:var(--line)}
@@ -351,6 +361,7 @@
       <div class="row">
         <input type="text" id="fSearch" placeholder="Поиск: магазин, компания, USCC, провинция, заметка">
         <select id="fStatus"><option value="">все статусы</option></select>
+        <select id="fCategory"><option value="">все категории ответа</option></select>
         <select id="fProvince"><option value="">все провинции</option></select>
         <select id="fTier">
           <option value="">все уровни</option>
@@ -689,6 +700,7 @@
   }
 
   var STATUS_LABELS = {};
+  var REPLY_LABELS = {};   // метки категорий ответов — приходят из /api/sellers
   var selected = new Set();
   var drafts = {};
   var SUM = {};                       // последняя сводка из /api/summary
@@ -753,7 +765,7 @@
   /* ---------- состояние таблиц ---------- */
   var T = {
     sellers: {limit:50, offset:0, search:"", statuses:[], provinces:[], tier:"",
-              order_by:"score", order:"desc", rows:[], total:0, verified_only:true},
+              categories:[], order_by:"score", order:"desc", rows:[], total:0, verified_only:true},
     rejected:{limit:50, offset:0, search:"", statuses:[], provinces:[], tier:"none",
               order_by:"score", order:"desc", rows:[], total:0, verified_only:false}
   };
@@ -769,6 +781,7 @@
     if (t.tier) p.set("tier", t.tier);
     if (t.statuses.length) p.set("status", t.statuses.join(","));
     if (t.provinces.length) p.set("province", t.provinces.join(","));
+    if (t.categories.length) p.set("category", t.categories.join(","));
     if (MARKETPLACE === "wb") p.set("marketplace", "wb");
     return p;
   }
@@ -780,6 +793,10 @@
       t.statuses = $("fStatus").value ? [$("fStatus").value] : [];
       t.provinces = $("fProvince").value ? [$("fProvince").value] : [];
       t.tier = $("fTier").value;
+      // Спец-значение «все заинтересованные» — три категории сразу
+      t.categories = $("fCategory").value === "__interested"
+        ? ["positive", "interested", "needs_info"]
+        : ($("fCategory").value ? [$("fCategory").value] : []);
     } else {
       t.search = $("rSearch").value.trim();
     }
@@ -793,6 +810,7 @@
         t.rows = data.rows || [];
         t.total = data.total || 0;
         STATUS_LABELS = data.status_labels || STATUS_LABELS;
+        if (data.reply_labels) { REPLY_LABELS = data.reply_labels; }
         renderTable(name);
         fillFacets(data);
       })
@@ -817,6 +835,17 @@
         $("bulkStatus").appendChild(o2);
       });
       $("fStatus").dataset.filled = "1";
+    }
+    if (!$("fCategory").dataset.filled && data.reply_labels) {
+      var first = document.createElement("option");
+      first.value = "__interested"; first.textContent = "заинтересованные (все)";
+      $("fCategory").appendChild(first);
+      Object.keys(data.reply_labels).forEach(function(key){
+        var o = document.createElement("option");
+        o.value = key; o.textContent = data.reply_labels[key].toLowerCase();
+        $("fCategory").appendChild(o);
+      });
+      $("fCategory").dataset.filled = "1";
     }
     if (!$("fProvince").dataset.filled && data.provinces) {
       data.provinces.forEach(function(pair){
@@ -843,6 +872,12 @@
     return '<span class="st-chip st-' + esc(status || "new") + '">' + statusDot(status) +
       esc(STATUS_LABELS[status] || status || "—") + "</span>";
   }
+  // Категория последнего ответа — цветной чип без точки
+  function replyChip(key){
+    if (!key) { return ""; }
+    return ' <span class="st-chip rc-' + esc(key) + '">' +
+      esc(REPLY_LABELS[key] || key) + "</span>";
+  }
 
   function sellerRowHtml(r){
     var badge = "";
@@ -863,9 +898,9 @@
       "<td>" + fmtNum(r.reviews) + "</td>" +
       "<td>" + (r.months_on_ozon || 0) + " мес</td>" +
       "<td>" + (r.rating || 0).toFixed(1) + "</td>" +
-      // Колонка «Ответ»: дата входящего, фиолетовым — сразу видно, кто ответил
+      // Колонка «Ответ»: дата входящего + категория, сразу видно, кто и как ответил
       "<td>" + (r.last_reply_at
-        ? '<span class="badge-verify warehouse">✉ ' + esc(fmtDate(r.last_reply_at)) + "</span>"
+        ? '<span class="badge-verify warehouse">✉ ' + esc(fmtDate(r.last_reply_at)) + "</span>" + replyChip(r.reply_category)
         : '<span class="muted">—</span>') + "</td>" +
       '<td><select class="sel-status st-' + esc(r.status || "new") + '" data-seller="' +
         esc(r.seller_id) + '">' + statusOptions(r.status) + "</select></td>" +
@@ -934,7 +969,7 @@
         '<a class="cs-link" href="' + esc(profile) + '" target="_blank" rel="noopener" ' +
           'aria-label="профиль на Ozon">↗</a>' +
       "</div>" +
-      '<div class="cs-meta">' + statusChip(r.status) + " · " + meta.join(" · ") + "</div>" +
+      '<div class="cs-meta">' + statusChip(r.status) + replyChip(r.reply_category) + " · " + meta.join(" · ") + "</div>" +
       '<div class="cs-actions">' +
         '<select class="sel-status st-' + esc(r.status || "new") + '" data-seller="' +
           esc(r.seller_id) + '">' + statusOptions(r.status) + "</select>" +
@@ -962,7 +997,7 @@
 
     if (!t.rows.length) {
       empty.style.display = "block";
-      empty.innerHTML = (t.search || t.provinces.length || t.statuses.length || t.tier)
+      empty.innerHTML = (t.search || t.provinces.length || t.statuses.length || t.tier || (t.categories && t.categories.length))
         ? "<div>Ничего не найдено по этим условиям.</div>"
         : (name === "sellers"
             ? "<div>База пуста. Откройте вкладку «Сбор» и соберите продавцов.</div>"
@@ -1156,6 +1191,9 @@
           ["Рейтинг", (d.rating || 0).toFixed(1)],
           ["Оценка", (d.score || 0).toFixed(2)],
           ["Статус", STATUS_LABELS[d.status] || d.status],
+          ["Категория ответа", REPLY_LABELS[d.reply_category] || "—"],
+          ["Ответ получен", d.reply_at ? fmtDate(d.reply_at) : "—"],
+          ["Передан менеджеру", d.handed_to_manager_at ? fmtDate(d.handed_to_manager_at) : "—"],
           ["Витрин у компании", d.same_company || 1],
           ["Первое появление", fmtDate(d.first_seen_at)],
           ["Последний сбор", fmtDate(d.last_seen_at)],
@@ -1177,8 +1215,16 @@
             '<div class="reasons">' + esc(d.message_sent) + "</div>";
         }
         html += '<div id="historyBox" style="margin-top:14px"></div>';
-        // CRM: стадия сделки и ответ продавцу прямо из карточки
-        html += '<div class="row" style="margin-top:14px;align-items:center">' +
+        // CRM: категория ответа, стадия сделки и ответ продавцу прямо из карточки
+        var catOptions = Object.keys(REPLY_LABELS).map(function(key){
+          return '<option value="' + key + '"' + (key === d.reply_category ? " selected" : "") + ">" +
+            esc(REPLY_LABELS[key]) + "</option>";
+        }).join("");
+        html += '<div class="row" style="margin-top:14px;align-items:center;flex-wrap:wrap;gap:10px">' +
+          '<label class="check">категория ' +
+            '<select id="stCategory" class="sel-category" style="min-width:210px">' +
+              '<option value=""' + (!d.reply_category ? " selected" : "") + '>— не задана —</option>' +
+              catOptions + "</select></label>" +
           '<label class="check">стадия ' +
             '<select id="stStage" style="min-width:130px">' +
               '<option value="">—</option>' +
@@ -1186,7 +1232,12 @@
               '<option value="deal"' + (d.stage === "deal" ? " selected" : "") + '>сделка</option>' +
               '<option value="dead"' + (d.stage === "dead" ? " selected" : "") + '>закрыли</option>' +
             "</select></label>" +
-          '<span class="muted">стадия видна в воронке на «Обзоре»</span>' +
+          '<span class="muted">категория ставится автоматически, здесь можно поправить</span>' +
+        "</div>" +
+        '<div class="row" style="margin-top:10px;align-items:center">' +
+          '<button class="ghost" id="btnHandover"' + (d.handed_to_manager_at ? " disabled" : "") + '>Передать менеджеру</button>' +
+          '<span class="muted" id="handoverState">' +
+            (d.handed_to_manager_at ? "передан " + esc(fmtDate(d.handed_to_manager_at)) : "кнопка для заинтересованных") + "</span>" +
         "</div>" +
         '<div class="muted" style="margin-top:12px">Ответить в чат Ozon</div>' +
         '<textarea id="replyText" rows="4" spellcheck="false" style="width:100%;margin-top:6px;' +
@@ -1205,6 +1256,32 @@
         $("drawer").classList.add("open");
         $("overlay").classList.add("open");
         $("drawerClose").addEventListener("click", closeDrawer);
+
+        // Категория ответа: сохраняется сразу при смене
+        $("stCategory").addEventListener("change", function(){
+          var select = this;
+          postJson("/api/seller/category", {seller_id: d.seller_id, category: this.value, marketplace: MARKETPLACE})
+            .then(function(){
+              toast("Категория сохранена", "ok");
+              if (d.reply_category) { loadTable("sellers"); }
+              loadStats();
+            })
+            .catch(function(err){
+              toast("Не сохранено: " + err.message, "err");
+              select.value = d.reply_category || "";
+            });
+        });
+
+        // Передача менеджеру: отметка в базе, продавец остаётся в общем списке
+        $("btnHandover").addEventListener("click", function(){
+          if (!confirm("Передать продавца менеджеру? Отметка сохранится в базе.")) { return; }
+          postJson("/api/seller/handover", {seller_id: d.seller_id, marketplace: MARKETPLACE})
+            .then(function(){
+              toast("Продавец передан менеджеру", "ok");
+              openDrawer(d.seller_id);   // перерисовать карточку с отметкой
+            })
+            .catch(function(err){ toast("Не передано: " + err.message, "err"); });
+        });
 
         // Стадия сделки: сохраняется сразу при смене
         $("stStage").addEventListener("change", function(){
@@ -1254,8 +1331,10 @@
                 var color = m.result === "sent" ? "var(--ok)"
                   : m.result === "received" ? "var(--purple)"
                   : "var(--err)";
+                var cat = (m.result === "received" && m.category)
+                  ? ' · ' + esc(REPLY_LABELS[m.category] || m.category) : "";
                 return '<div class="reasons" style="margin-top:6px">' +
-                  '<span style="color:' + color + '">' + mark + "</span> · " +
+                  '<span style="color:' + color + '">' + mark + "</span>" + cat + " · " +
                   esc(fmtDate(m.sent_at)) +
                   (m.error ? ' <span style="color:var(--err)">' + esc(m.error) + "</span>" : "") +
                   '<div style="margin-top:4px;color:var(--text)">' + esc(m.text.slice(0, 400)) + "</div></div>";
@@ -1548,12 +1627,18 @@
   function renderFunnel(){
     var c = STATS.counts || {};
     var st = STATS.stageCounts || {};
-    var contacted = (c.sent || 0) + (c.replied || 0) + (c.refused || 0) + (c.opted_out || 0);
+    // Цифры воронки — по журналу сообщений (comm_counts): статус меняется
+    // руками, а журнал хранит факты. Заинтересованные — три категории сразу.
+    var comm = STATS.commCounts || {};
+    var rc = STATS.replyCounts || {};
+    var interested = (rc.positive || 0) + (rc.interested || 0) + (rc.needs_info || 0);
     var steps = [
-      {label: "В базе", value: STATS.total || 0, cls: "kp-blue"},
-      {label: "Написали", value: contacted, cls: "st-sent"},
-      {label: "Ответили", value: c.replied || 0, cls: "st-replied"},
-      {label: "Переговоры", value: st.negotiation || 0, cls: "kp-purple"},
+      {label: "В базе", value: comm.total || STATS.total || 0, cls: "kp-blue"},
+      {label: "Написали", value: comm.messaged || 0, cls: "st-sent"},
+      {label: "Не ответили", value: comm.no_reply || 0, cls: "st-failed"},
+      {label: "Ответили", value: comm.replied || 0, cls: "st-replied"},
+      {label: "Заинтересованные", value: interested, cls: "rc-interested"},
+      {label: "У менеджера", value: comm.handed || 0, cls: "kp-purple"},
       {label: "Сделка", value: st.deal || 0, cls: "kp-ok"},
       {label: "Закрыли", value: st.dead || 0, cls: "kp-err"}
     ];
@@ -1594,7 +1679,7 @@
       return '<div class="recent-item" data-reply-seller="' + esc(m.seller_id) + '" style="cursor:pointer">' +
         '<span class="st-dot st-replied"></span>' +
         '<div style="flex:1;min-width:0">' +
-          '<div class="recent-shop">' + esc(m.shop_name || m.seller_id) + "</div>" +
+          '<div class="recent-shop">' + esc(m.shop_name || m.seller_id) + replyChip(m.category) + "</div>" +
           '<div class="recent-text">' + esc(String(m.text || "").replace(/^\[входящее[^\]]*\]\s*/, "").slice(0, 160)) + "</div>" +
         "</div>" +
         '<span class="recent-when">' + esc(fmtDate(m.sent_at)) + " · открыть ↗</span>" +
@@ -1770,6 +1855,7 @@
     return fetch("/api/stats" + mpQ()).then(function(r){ return r.json(); }).then(function(d){
       if (d.error) { return; }
       STATUS_LABELS = d.status_labels || STATUS_LABELS;
+      if (d.reply_labels) { REPLY_LABELS = d.reply_labels; }
       STATS.counts = d.status_counts || {};
       STATS.days = d.sent_by_day || [];
       STATS.recent = d.recent || [];
@@ -1779,7 +1865,8 @@
       STATS.reminders = d.reminders || [];
       STATS.replies = d.replies_recent || [];
       STATS.inboxAuto = d.inbox_auto || {};
-      STATS.inboxAuto = d.inbox_auto || {};
+      STATS.commCounts = d.comm_counts || {};
+      STATS.replyCounts = d.reply_counts || {};
       renderOverview();
       renderCharts();
       renderRecent();
@@ -1903,7 +1990,7 @@
   });
 
   $("fSearch").addEventListener("input", function(){ T.sellers.offset = 0; debounce(loadTable, "sellers"); });  $("rSearch").addEventListener("input", function(){ T.rejected.offset = 0; debounce(loadTable, "rejected"); });
-  ["fStatus","fProvince","fTier"].forEach(function(id){
+  ["fStatus","fCategory","fProvince","fTier"].forEach(function(id){
     $(id).addEventListener("change", function(){ T.sellers.offset = 0; loadTable("sellers"); });
   });
   $("fPageSize").addEventListener("change", function(){
@@ -1913,9 +2000,9 @@
   });
   $("btnReset").addEventListener("click", function(){
     $("fSearch").value = ""; $("fStatus").value = ""; $("fProvince").value = "";
-    $("fTier").value = ""; $("fPageSize").value = "50";
+    $("fTier").value = ""; $("fPageSize").value = "50"; $("fCategory").value = "";
     var t = T.sellers;
-    t.search = ""; t.statuses = []; t.provinces = []; t.tier = "";
+    t.search = ""; t.statuses = []; t.provinces = []; t.tier = ""; t.categories = [];
     t.offset = 0; t.order_by = "score"; t.order = "desc"; t.limit = 50;
     document.querySelectorAll("#view-sellers th .arrow").forEach(function(a){ a.remove(); });
     loadTable("sellers");
@@ -1962,9 +2049,9 @@
   });
   $("btnQueue").addEventListener("click", function(){
     $("fSearch").value = ""; $("fProvince").value = ""; $("fTier").value = "";
-    $("fStatus").value = "new"; $("fPageSize").value = "25";
+    $("fStatus").value = "new"; $("fPageSize").value = "25"; $("fCategory").value = "";
     var t = T.sellers;
-    t.search = ""; t.provinces = []; t.tier = ""; t.statuses = ["new"];
+    t.search = ""; t.provinces = []; t.tier = ""; t.statuses = ["new"]; t.categories = [];
     t.order_by = "score"; t.order = "desc"; t.offset = 0; t.limit = 25;
     loadTable("sellers");
     toast("Показаны те, кому ещё не писали, по убыванию оценки", "ok");

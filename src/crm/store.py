@@ -13,6 +13,7 @@
 """
 
 import logging
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -49,6 +50,32 @@ STATUS_LABELS = {
     STATUS_SKIPPED: "пропущен",
     STATUS_OPTED_OUT: "не писать",
 }
+
+# --- Категории ответов ------------------------------------------------------
+# Ставятся автоматически при появлении ответа (src/crm/classify.py) и могут
+# быть поправлены вручную в дашборде. Ключи английские — как у статусов;
+# в интерфейсе и отчётах показываются русские метки. «НЕ ОТВЕТИЛ» в sellers
+# не хранится: это производное состояние (писали, а входящих нет), его
+# report/списки выводят сами.
+REPLY_POSITIVE = "positive"      # ПОЗИТИВНЫЙ: рад, спасибо, хорошо
+REPLY_NEGATIVE = "negative"      # НЕГАТИВНЫЙ: не интересно, не нужно
+REPLY_NEUTRAL = "neutral"        # НЕЙТРАЛЬНЫЙ: ок, понял, привет
+REPLY_INTERESTED = "interested"  # ЗАИНТЕРЕСОВАН: давайте обсудим условия
+REPLY_NEEDS_INFO = "needs_info"  # НУЖНА ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ: расскажите подробнее
+REPLY_OTHER = "other"            # ДРУГОЕ: не получилось отнести к категории
+
+REPLY_CATEGORY_LABELS = {
+    REPLY_POSITIVE: "ПОЗИТИВНЫЙ",
+    REPLY_NEGATIVE: "НЕГАТИВНЫЙ",
+    REPLY_NEUTRAL: "НЕЙТРАЛЬНЫЙ",
+    REPLY_INTERESTED: "ЗАИНТЕРЕСОВАН",
+    REPLY_NEEDS_INFO: "НУЖНА ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ",
+    REPLY_OTHER: "ДРУГОЕ",
+}
+
+# «Заинтересованные» для отдельного списка: положительный или потенциально
+# положительный ответ. Эти продавцы не должны теряться в общей базе.
+INTERESTED_CATEGORIES = (REPLY_POSITIVE, REPLY_INTERESTED, REPLY_NEEDS_INFO)
 
 # --- Уровни достоверности ------------------------------------------------
 # Насколько надёжно подтверждено, что продавец китайский. В дашборде по
@@ -89,11 +116,20 @@ CRM_COLUMNS = {
     # Стадия сделки для тех, кто ответил: '', 'negotiation', 'deal', 'dead'.
     # Отдельная ось CRM: статус — про рассылку, стадия — про сделку.
     "stage": "TEXT NOT NULL DEFAULT ''",
+    # Категория ПОСЛЕДНЕГО ответа продавца. Полная история категорий —
+    # в messages.category у каждой входящей записи.
+    "reply_category": "TEXT NOT NULL DEFAULT ''",
+    # Когда получен последний ответ (сообщение result='received').
+    "reply_at": "TEXT NOT NULL DEFAULT ''",
+    # Когда продавец передан менеджеру. Пусто = бот ещё ведёт.
+    "handed_to_manager_at": "TEXT NOT NULL DEFAULT ''",
 }
 
 # Журнал отправок. В sellers.message_sent хранится только последнее сообщение
 # и оно перезаписывается, поэтому «что писали и что было на прошлой попытке»
-# узнать было нельзя.
+# узнать было нельзя. result='received' — входящие от продавца: текст хранится
+# ЦЕЛИКОМ, без обрезки и без служебных префиксов (главное требование — ни один
+# ответ не должен теряться); sent_at у входящих — время получения.
 MESSAGES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,10 +137,12 @@ CREATE TABLE IF NOT EXISTS messages (
     text        TEXT NOT NULL DEFAULT '',
     sent_at     TEXT NOT NULL,
     result      TEXT NOT NULL DEFAULT 'sent',
-    error       TEXT NOT NULL DEFAULT ''
+    error       TEXT NOT NULL DEFAULT '',
+    category    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_messages_seller ON messages(seller_id, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_result ON messages(result, seller_id);
 """
 
 SCHEMA_TABLE = """
@@ -137,7 +175,10 @@ CREATE TABLE IF NOT EXISTS sellers (
     last_seen_at        TEXT NOT NULL DEFAULT '',
     product_count       INTEGER NOT NULL DEFAULT 0,
     chinese_reasons     TEXT NOT NULL DEFAULT '',
-    metrics_at          TEXT NOT NULL DEFAULT ''
+    metrics_at          TEXT NOT NULL DEFAULT '',
+    reply_category      TEXT NOT NULL DEFAULT '',
+    reply_at            TEXT NOT NULL DEFAULT '',
+    handed_to_manager_at TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -202,7 +243,7 @@ SELECT_FIELDS = (
     "orders, reviews, months_on_ozon, rating, score, is_chinese, verified_by, "
     "seller_profile_url, sample_product_url, status, notes, attempts, last_attempt_at, "
     "last_error, message_sent, first_seen_at, last_seen_at, product_count, chinese_reasons, "
-    "sent_at, metrics_at"
+    "sent_at, metrics_at, stage, reply_category, reply_at, handed_to_manager_at"
 )
 
 
@@ -244,7 +285,16 @@ class SellerStore:
             conn.executescript(SCHEMA_INDEXES)
             conn.executescript(SCHEMA_INDEXES_AFTER_MIGRATION)
             conn.executescript(MESSAGES_SCHEMA)
+            self._migrate_messages(conn)
             conn.executescript(PRODUCTS_SCHEMA)
+
+    @staticmethod
+    def _migrate_messages(conn: sqlite3.Connection) -> None:
+        """Категория ответа в журнале сообщений (для баз, созданных раньше её)."""
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+        if "category" not in existing:
+            conn.execute("ALTER TABLE messages ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+            logger.info("Миграция: добавлена колонка messages.category")
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -345,6 +395,7 @@ class SellerStore:
         provinces: Optional[Sequence[str]] = None,
         search: str = "",
         tiers: Optional[Sequence[str]] = None,
+        reply_categories: Optional[Sequence[str]] = None,
     ) -> Tuple[str, List]:
         """Собирает WHERE и параметры для выборки продавцов.
 
@@ -370,6 +421,10 @@ class SellerStore:
             where.append(f"province IN ({','.join('?' * len(provinces))})")
             params.extend(provinces)
 
+        if reply_categories:
+            where.append(f"reply_category IN ({','.join('?' * len(reply_categories))})")
+            params.extend(reply_categories)
+
         if search:
             where.append(
                 "(shop_name LIKE ? OR company_name LIKE ? OR uscc LIKE ? "
@@ -392,6 +447,7 @@ class SellerStore:
         include_unverified: bool = False,
         provinces: Optional[Sequence[str]] = None,
         tiers: Optional[Sequence[str]] = None,
+        reply_categories: Optional[Sequence[str]] = None,
     ) -> List[sqlite3.Row]:
         """Список продавцов для дашборда.
 
@@ -412,6 +468,7 @@ class SellerStore:
             provinces=provinces,
             search=search,
             tiers=tiers,
+            reply_categories=reply_categories,
         )
         order_sql = "last_reply_at" if order_by == "last_reply_at" else order_by
         # База в подзапросе: WHERE остаётся однозначным (без префиксов), а JOIN
@@ -437,6 +494,7 @@ class SellerStore:
         statuses: Optional[Sequence[str]] = None,
         provinces: Optional[Sequence[str]] = None,
         tiers: Optional[Sequence[str]] = None,
+        reply_categories: Optional[Sequence[str]] = None,
     ) -> int:
         """Число записей под теми же условиями, что и list_sellers."""
         where, params = self._build_filter(
@@ -445,6 +503,7 @@ class SellerStore:
             provinces=provinces,
             search=search,
             tiers=tiers,
+            reply_categories=reply_categories,
         )
         with self._connect() as conn:
             return int(conn.execute(f"SELECT COUNT(*) AS n FROM sellers{where}", params).fetchone()["n"])
@@ -758,6 +817,295 @@ class SellerStore:
             ).fetchall()
         return {r["stage"]: int(r["n"]) for r in rows}
 
+    # --- Коммуникации: ответы, категории, передача менеджеру ----------------
+    # Требование проекта: ни один ответ продавца не должен теряться. Полный
+    # текст живёт в messages (result='received') навсегда; на самом продавце
+    # лежит только «текущее» — последняя категория и дата последнего ответа.
+
+    def save_reply(
+        self, seller_id: str, text: str, received_at: str = "",
+        category: Optional[str] = None,
+    ) -> str:
+        """Сохраняет ответ продавца ЦЕЛИКОМ и помечает его ответившим.
+
+        Текст пишется в журнал как есть — без префиксов и обрезки. Дата
+        получения — received_at (присылает Ozon), иначе текущий момент.
+        Категорию ставит классификатор, если не передана явно. Возвращает
+        категорию.
+        """
+        from .classify import classify_reply
+
+        text = (text or "").strip()
+        if not text:
+            raise ValueError("Пустой ответ нельзя сохранять: это либо потеря данных, либо ошибка вызова")
+        when = received_at or _now()
+        if category is None:
+            category = classify_reply(text)
+        elif category not in REPLY_CATEGORY_LABELS:
+            raise ValueError(
+                f"Неизвестная категория: {category}. Доступны: {', '.join(REPLY_CATEGORY_LABELS)}"
+            )
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO messages (seller_id, text, sent_at, result, category) "
+                "VALUES (?, ?, ?, 'received', ?)",
+                (seller_id, text, when, category),
+            )
+            # Статус «ответил» ставим только тем, у кого рассылка ещё жива:
+            # стоп-лист не переписываем, остальным — можно.
+            conn.execute(
+                "UPDATE sellers SET reply_category = ?, reply_at = ?, updated_at = ?, "
+                "status = CASE WHEN status = ? THEN status ELSE ? END "
+                "WHERE seller_id = ?",
+                (category, when, _now(), STATUS_OPTED_OUT, STATUS_REPLIED, seller_id),
+            )
+        return category
+
+    def update_reply_text(self, seller_id: str, text: str, received_at: str = "") -> bool:
+        """Обновляет ПОСЛЕДНИЙ входящий продавца полным текстом.
+
+        Нужно дотягиванию задним числом: продавцы, помеченные «ответил» до
+        появления полного разбора чата, хранят только превью из списка
+        чатов. Перезаписываем только если новый текст ДЛИННЕЕ сохранённого:
+        превью боится обрезки, а укорачивать уже сохранённое опасно.
+        Категория пересчитывается, дата получения уточняется, если пришла.
+        """
+        from .classify import classify_reply
+
+        text = (text or "").strip()
+        if not text:
+            return False
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, text FROM messages "
+                "WHERE seller_id = ? AND result = 'received' "
+                "ORDER BY id DESC LIMIT 1",
+                (seller_id,),
+            ).fetchone()
+            if not row or len(text) <= len((row["text"] or "").strip()):
+                return False
+            category = classify_reply(text)
+            if received_at:
+                conn.execute(
+                    "UPDATE messages SET text = ?, category = ?, sent_at = ? WHERE id = ?",
+                    (text, category, received_at, row["id"]),
+                )
+                conn.execute(
+                    "UPDATE sellers SET reply_category = ?, reply_at = ?, updated_at = ? "
+                    "WHERE seller_id = ?",
+                    (category, received_at, _now(), seller_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE messages SET text = ?, category = ? WHERE id = ?",
+                    (text, category, row["id"]),
+                )
+                conn.execute(
+                    "UPDATE sellers SET reply_category = ?, updated_at = ? "
+                    "WHERE seller_id = ?",
+                    (category, _now(), seller_id),
+                )
+        return True
+
+    def set_reply_category(self, seller_id: str, category: str) -> bool:
+        """Ручная правка категории: и на продавце, и на его последнем ответе."""
+        if category not in REPLY_CATEGORY_LABELS:
+            raise ValueError(
+                f"Неизвестная категория: {category}. Доступны: {', '.join(REPLY_CATEGORY_LABELS)}"
+            )
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE sellers SET reply_category = ?, updated_at = ? WHERE seller_id = ?",
+                (category, _now(), seller_id),
+            )
+            if not cur.rowcount:
+                return False
+            last = conn.execute(
+                "SELECT id FROM messages WHERE seller_id = ? AND result = 'received' "
+                "ORDER BY id DESC LIMIT 1",
+                (seller_id,),
+            ).fetchone()
+            if last:
+                conn.execute("UPDATE messages SET category = ? WHERE id = ?", (category, last["id"]))
+        return True
+
+    def hand_to_manager(self, seller_id: str) -> bool:
+        """Передаёт продавца менеджеру.
+
+        Никаких копий: продавец остаётся в общей базе, отметка времени в
+        handed_to_manager_at отфильтровывает тех, кем уже занимается человек.
+        Стадия автоматически становится «переговоры», если была пустой.
+        """
+        now = _now()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE sellers SET handed_to_manager_at = ?, updated_at = ?, "
+                "stage = CASE WHEN stage = '' THEN 'negotiation' ELSE stage END "
+                "WHERE seller_id = ?",
+                (now, now, seller_id),
+            )
+            handed = cur.rowcount > 0
+        if handed:
+            logger.info(f"Передан менеджеру: {seller_id}")
+        return handed
+
+    def communication_counts(self) -> dict:
+        """Главные цифры рассылки по фактам из журнала сообщений.
+
+        «Писали» и «ответили» считаем по messages, а не по статусу: статус
+        меняется руками, журнал — факты. «Не ответили» = писали минус ответили.
+        """
+        with self._connect() as conn:
+            total = int(conn.execute("SELECT COUNT(*) n FROM sellers").fetchone()["n"])
+            messaged = int(conn.execute(
+                "SELECT COUNT(DISTINCT seller_id) n FROM messages WHERE result = 'sent'"
+            ).fetchone()["n"])
+            replied = int(conn.execute(
+                "SELECT COUNT(DISTINCT seller_id) n FROM messages WHERE result = 'received'"
+            ).fetchone()["n"])
+            no_reply = int(conn.execute(
+                "SELECT COUNT(*) n FROM ("
+                "  SELECT DISTINCT seller_id FROM messages WHERE result = 'sent' "
+                "  EXCEPT SELECT DISTINCT seller_id FROM messages WHERE result = 'received')"
+            ).fetchone()["n"])
+            handed = int(conn.execute(
+                "SELECT COUNT(*) n FROM sellers WHERE handed_to_manager_at != ''"
+            ).fetchone()["n"])
+        return {
+            "total": total,
+            "messaged": messaged,
+            "no_reply": no_reply,
+            "replied": replied,
+            "handed": handed,
+        }
+
+    def category_counts(self) -> dict:
+        """Сколько продавцов в каждой категории последнего ответа."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT reply_category, COUNT(*) AS n FROM sellers "
+                "WHERE reply_category != '' GROUP BY reply_category"
+            ).fetchall()
+        return {r["reply_category"]: int(r["n"]) for r in rows}
+
+    def comm_report_rows(
+        self,
+        replied: Optional[bool] = None,
+        categories: Optional[Sequence[str]] = None,
+        handed: Optional[bool] = None,
+        messaged: Optional[bool] = None,
+        limit: int = 2000,
+    ) -> List[dict]:
+        """Строки для отчётов по коммуникации: продавец + последний ответ.
+
+        replied: True — только ответившие, False — только без входящих, None —
+        без условия. messaged: True — только те, кому реально писали. categories —
+        фильтр по категории последнего ответа, handed — по передаче менеджеру.
+        Условие «ответил» берётся из журнала, поэтому старые ручные пометки
+        статуса отчёты не искажают. «Не ответили» = messaged=True + replied=False:
+        без этого в список попадали все, кому ещё не дошла очередь.
+        """
+        where: List[str] = []
+        params: List = []
+        if messaged is True:
+            where.append(
+                "EXISTS (SELECT 1 FROM messages m WHERE m.seller_id = s.seller_id "
+                "AND m.result = 'sent')"
+            )
+        elif messaged is False:
+            where.append(
+                "NOT EXISTS (SELECT 1 FROM messages m WHERE m.seller_id = s.seller_id "
+                "AND m.result = 'sent')"
+            )
+        if replied is True:
+            where.append(
+                "EXISTS (SELECT 1 FROM messages m WHERE m.seller_id = s.seller_id "
+                "AND m.result = 'received')"
+            )
+        elif replied is False:
+            where.append(
+                "NOT EXISTS (SELECT 1 FROM messages m WHERE m.seller_id = s.seller_id "
+                "AND m.result = 'received')"
+            )
+        if categories:
+            where.append(f"s.reply_category IN ({','.join('?' * len(categories))})")
+            params.extend(categories)
+        if handed is True:
+            where.append("s.handed_to_manager_at != ''")
+        elif handed is False:
+            where.append("s.handed_to_manager_at = ''")
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        params.append(max(1, limit))
+        sql = f"""SELECT s.seller_id, s.shop_name, s.company_name, s.province, s.status,
+                s.stage, s.notes, s.seller_profile_url, s.score, s.uscc,
+                s.reply_category, s.reply_at, s.handed_to_manager_at,
+                s.sent_at AS last_sent_at, s.message_sent AS last_sent_text,
+                (SELECT text FROM messages WHERE seller_id = s.seller_id
+                  AND result = 'received' ORDER BY id DESC LIMIT 1) AS last_reply_text
+            FROM sellers s{where_sql}
+            ORDER BY COALESCE(NULLIF(s.reply_at, ''), s.sent_at) DESC, s.score DESC
+            LIMIT ?"""
+        with self._connect() as conn:
+            return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+    def interested_rows(self, limit: int = 2000) -> List[dict]:
+        """Заинтересованные: положительный или потенциально положительный ответ.
+
+        Отдельный список, ради которого всё и затевалось: эти продавцы не
+        должны теряться в общей базе. Копий не создаём — фильтр по категории.
+        """
+        return self.comm_report_rows(
+            replied=True, categories=INTERESTED_CATEGORIES, limit=limit
+        )
+
+    def recategorize(self, overwrite: bool = False) -> int:
+        """Прогоняет классификатор по сохранённым ответам.
+
+        Без overwrite правит только пустые категории (старые записи);
+        с overwrite — пересчитывает все. Нужно после обновления правил:
+        тексты ответов хранятся целиком, поэтому пересчитать можно всегда.
+        Заодно чистит исторический префикс «[входящее …]», который раньше
+        вклеивался в текст ответа: в тексте должен быть только сам ответ.
+        """
+        from .classify import classify_reply
+
+        with self._connect() as conn:
+            # Старый inbox вклеивал дату в текст — убираем, дата есть в sent_at
+            for row in conn.execute(
+                "SELECT id, text FROM messages WHERE result = 'received' "
+                "AND text LIKE '[входящее%'"
+            ).fetchall():
+                cleaned = re.sub(r"^\[входящее[^\]]*\]\s*", "", row["text"])
+                if cleaned:
+                    conn.execute(
+                        "UPDATE messages SET text = ? WHERE id = ?", (cleaned, row["id"])
+                    )
+            rows = conn.execute(
+                "SELECT id, seller_id, text, category FROM messages "
+                "WHERE result = 'received' ORDER BY id"
+            ).fetchall()
+            changed = 0
+            for row in rows:
+                if row["category"] and not overwrite:
+                    continue
+                category = classify_reply(row["text"])
+                if category == row["category"]:
+                    continue
+                conn.execute(
+                    "UPDATE messages SET category = ? WHERE id = ?", (category, row["id"])
+                )
+                changed += 1
+            # Категория продавца — по его последнему ответу в журнале.
+            conn.execute(
+                "UPDATE sellers SET reply_category = COALESCE("
+                "  (SELECT category FROM messages"
+                "   WHERE seller_id = sellers.seller_id AND result = 'received'"
+                "   ORDER BY id DESC LIMIT 1), '')"
+            )
+        if changed:
+            logger.info(f"Перекатегоризовано ответов: {changed}")
+        return changed
+
     def reminders(self, days: int = 3, limit: int = 12) -> List[dict]:
         """«Пора напомнить»: ответили и замолчали больше N дней.
 
@@ -787,12 +1135,13 @@ class SellerStore:
         return [dict(r) for r in rows]
 
     def replied_export_rows(self, limit: int = 2000) -> List[dict]:
-        """Ответившие со стадиями и последними сообщениями — для XLSX."""
+        """Ответившие со стадиями, категориями и последними сообщениями — для XLSX."""
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT s.seller_id, s.shop_name, s.company_name, s.province, "
                 "       s.orders, s.reviews, s.rating, s.score, s.status, s.stage, "
-                "       s.notes, s.seller_profile_url, "
+                "       s.notes, s.seller_profile_url, s.reply_category, s.reply_at, "
+                "       s.handed_to_manager_at, "
                 "       (SELECT text FROM messages WHERE seller_id = s.seller_id "
                 "         AND result = 'received' ORDER BY id DESC LIMIT 1) AS last_incoming, "
                 "       (SELECT text FROM messages WHERE seller_id = s.seller_id "
@@ -808,7 +1157,7 @@ class SellerStore:
         """История переписки с продавцом, свежие сверху."""
         with self._connect() as conn:
             return conn.execute(
-                "SELECT text, sent_at, result, error FROM messages "
+                "SELECT text, sent_at, result, error, category FROM messages "
                 "WHERE seller_id = ? ORDER BY sent_at DESC, id DESC LIMIT ?",
                 (seller_id, limit),
             ).fetchall()
@@ -853,7 +1202,7 @@ class SellerStore:
         """
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT m.seller_id, m.text, m.sent_at, "
+                "SELECT m.seller_id, m.text, m.sent_at, m.category, "
                 "       COALESCE(s.shop_name, '') AS shop_name "
                 "FROM messages m LEFT JOIN sellers s ON s.seller_id = m.seller_id "
                 "WHERE m.result = 'received' "

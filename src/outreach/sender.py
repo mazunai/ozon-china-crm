@@ -31,7 +31,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from .queue_db import OutreachQueue
 from ..crm.store import STATUS_NEW
@@ -436,6 +436,33 @@ class ChatClient:
             return bool(self._find(self.selectors.sent_marker))
         time.sleep(1.0)
         return self.field_is_empty()
+
+    def read_incoming_texts(self) -> List[str]:
+        """Тексты сообщений СОБЕСЕДНИКА из открытого чата, в порядке очерёдности.
+
+        Разметка снята с живого чата 26.09.2026: у каждого сообщения есть
+        атрибут is-mine («mine» — наше, пустой — собеседник или система Ozon),
+        а сам текст лежит внутри блока, чей класс содержит «mess». Время
+        отправки — span с чч:мм, его вырезаем. Служебные сообщения Ozon
+        («Ассистент Ozon…») тоже приходят с пустым is-mine — их отфильтровывает
+        filter_incoming_bubbles в inbox.py, иначе робот принял бы подсказку
+        системы за ответ продавца.
+        """
+        script = """
+const isTime = (el) => /^\\d{1,2}:\\d{2}$/.test((el.textContent || '').trim());
+return [...document.querySelectorAll('[is-mine]')]
+  .filter((b) => b.getAttribute('is-mine') !== 'mine')
+  .map((b) => {
+    const clone = b.cloneNode(true);
+    clone.querySelectorAll('span, svg').forEach((el) => {
+      if (el.tagName.toLowerCase() === 'svg' || isTime(el)) { el.remove(); }
+    });
+    return (clone.innerText || clone.textContent || '').trim();
+  })
+  .filter(Boolean);
+"""
+        self._focus()
+        return [str(t) for t in (self.driver.execute_script(script) or []) if str(t).strip()]
 
 
 def preflight(config: SenderConfig, template, data_dir: Path, store=None,

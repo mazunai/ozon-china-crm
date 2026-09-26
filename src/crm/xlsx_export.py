@@ -18,6 +18,9 @@ HEADERS = [
     ("rating", "Рейтинг"),
     ("score", "Оценка"),
     ("status", "Статус"),
+    ("reply_category", "Категория ответа"),
+    ("reply_at", "Ответ получен"),
+    ("handed_to_manager_at", "Передан менеджеру"),
     ("stage", "Стадия"),
     ("notes", "Заметка"),
     ("last_incoming", "Последнее входящее"),
@@ -30,6 +33,11 @@ STATUS_TITLES = {
     "new": "не написал", "sending": "отправляется", "sent": "написал",
     "replied": "ответил", "refused": "отказ", "failed": "ошибка",
     "skipped": "пропущен", "opted_out": "не писать",
+}
+REPLY_TITLES = {
+    "positive": "ПОЗИТИВНЫЙ", "negative": "НЕГАТИВНЫЙ", "neutral": "НЕЙТРАЛЬНЫЙ",
+    "interested": "ЗАИНТЕРЕСОВАН", "needs_info": "НУЖНА ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ",
+    "other": "ДРУГОЕ",
 }
 
 
@@ -56,10 +64,13 @@ def replied_xlsx(rows: List[dict]) -> bytes:
                 value = STAGE_TITLES.get(value, value)
             elif key == "status":
                 value = STATUS_TITLES.get(value, value)
+            elif key == "reply_category":
+                value = REPLY_TITLES.get(value, value)
             sheet.cell(row=index, column=col, value=value)
 
     widths = {"A": 12, "B": 26, "C": 30, "D": 12, "E": 9, "F": 9, "G": 8,
-              "H": 7, "I": 12, "J": 12, "K": 28, "L": 46, "M": 46, "N": 34}
+              "H": 7, "I": 12, "J": 30, "K": 17, "L": 17, "M": 12, "N": 28,
+              "O": 46, "P": 46, "Q": 34}
     for col, width in widths.items():
         sheet.column_dimensions[col].width = width
 

@@ -132,7 +132,7 @@ class SellersApi:
 
     def sellers(self, query: dict) -> dict:
         """Список продавцов с фильтрами и пагинацией."""
-        from src.crm.store import STATUS_LABELS, VERIFY_LABELS
+        from src.crm.store import REPLY_CATEGORY_LABELS, STATUS_LABELS, VERIFY_LABELS
 
         try:
             limit = min(max(int(query.get("limit", "100")), 1), 1000)
@@ -152,10 +152,12 @@ class SellersApi:
         statuses = multi("status")
         provinces = multi("province")
         tiers = multi("tier")
+        categories = multi("category")
         verified_only = query.get("verified_only", "1") not in ("0", "false", "no")
 
         store = self.store()
-        kwargs = dict(statuses=statuses, provinces=provinces, search=search, tiers=tiers)
+        kwargs = dict(statuses=statuses, provinces=provinces, search=search, tiers=tiers,
+                      reply_categories=categories)
         rows = store.list_sellers(
             verified_only=verified_only,
             order_by=order_by,
@@ -181,6 +183,7 @@ class SellersApi:
             "offset": offset,
             "status_labels": STATUS_LABELS,
             "verify_labels": VERIFY_LABELS,
+            "reply_labels": REPLY_CATEGORY_LABELS,
             "provinces": store.province_facets(),
         }
 
@@ -199,6 +202,7 @@ class SellersApi:
             statuses=multi("status"),
             provinces=multi("province"),
             tiers=multi("tier"),
+            reply_categories=multi("category"),
             search=query.get("search", ""),
             order_by=query.get("order_by", "score"),
             descending=query.get("order", "desc").lower() != "asc",
@@ -212,7 +216,10 @@ class SellersApi:
             ("province", "Провинция"), ("verified_by", "Достоверность"),
             ("orders", "Заказов"), ("reviews", "Отзывов"),
             ("months_on_ozon", "Месяцев на Ozon"), ("rating", "Рейтинг"),
-            ("score", "Оценка"), ("status", "Статус"), ("notes", "Заметка"),
+            ("score", "Оценка"), ("status", "Статус"),
+            ("reply_category", "Категория ответа"), ("reply_at", "Ответ получен"),
+            ("handed_to_manager_at", "Передан менеджеру"),
+            ("notes", "Заметка"),
             ("seller_profile_url", "Профиль продавца"),
             ("sample_product_url", "Товар"),
         ]
@@ -244,6 +251,15 @@ class SellersApi:
 
     def set_status(self, seller_id: str, status: str) -> dict:
         return {"ok": self.store().set_status(seller_id, status)}
+
+    def set_category(self, seller_id: str, category: str) -> dict:
+        try:
+            return {"ok": self.store().set_reply_category(seller_id, category)}
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+    def handover(self, seller_id: str) -> dict:
+        return {"ok": self.store().hand_to_manager(seller_id)}
 
 
 # Задержка между запросами по умолчанию — как в харвестере
@@ -725,7 +741,7 @@ class InboxAuto:
             try:
                 from src.crm.inbox import InboxChecker
 
-                result = InboxChecker(CRUD.store()).check()
+                result = InboxChecker(CRUD.store(), data_dir=SEND.DATA_DIR).check()
                 self.state.update({
                     "last_run": datetime.now().isoformat(timespec="seconds"),
                     "last_result": (
@@ -1637,7 +1653,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/stats":
             # Сводка для вкладки «Обзор»: статусы продавцов, отправки по дням
             # и лента последних сообщений.
-            from src.crm.store import STATUS_LABELS
+            from src.crm.store import REPLY_CATEGORY_LABELS, STATUS_LABELS
             store = self._crm(self._query()).store()
             return self._send_json({
                 "status_counts": store.status_counts(),
@@ -1647,6 +1663,10 @@ class Handler(BaseHTTPRequestHandler):
                 "inbox_auto": INBOX_AUTO.status(),
                 "recent": store.recent_messages(limit=14),
                 "status_labels": STATUS_LABELS,
+                # Коммуникации: категории ответов и передача менеджеру
+                "comm_counts": store.communication_counts(),
+                "reply_counts": store.category_counts(),
+                "reply_labels": REPLY_CATEGORY_LABELS,
                 # CRM: стадии сделки и «пора напомнить» — кто ответил и замолчал
                 "stage_counts": store.stage_counts(),
                 "stage_labels": store.STAGE_LABELS,
@@ -1863,6 +1883,27 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
 
+        if path == "/api/seller/category":
+            # Ручная правка категории ответа: классификатор бывает неточен,
+            # а решения по продавцу принимает человек.
+            seller_id = str(data.get("seller_id", "")).strip()
+            category = str(data.get("category", "")).strip()
+            if not seller_id:
+                return self._send_json({"error": "Не указан seller_id"}, 400)
+            result = self._crm_for_body(data).set_category(seller_id, category)
+            return self._send_json(result, 200 if result.get("ok") else 400)
+
+        if path == "/api/seller/handover":
+            # Передача заинтересованному продавцу менеджеру: отметка времени
+            # в базе, продавец остаётся в общей таблице.
+            seller_id = str(data.get("seller_id", "")).strip()
+            if not seller_id:
+                return self._send_json({"error": "Не указан seller_id"}, 400)
+            result = self._crm_for_body(data).handover(seller_id)
+            if result.get("ok"):
+                HUB.log(f"Передан менеджеру: {seller_id}")
+            return self._send_json(result)
+
         if path == "/api/seller/reply":
             # Ответ из дашборда: открываем чат продавца в общем Chrome и
             # отправляем текст. Синхронно (~20–40 с) — кнопка в интерфейсе
@@ -2057,7 +2098,7 @@ class Handler(BaseHTTPRequestHandler):
                     {"error": "Браузер занят другой задачей — дождитесь её завершения"}, 400)
             try:
                 from src.crm.inbox import InboxChecker
-                result = InboxChecker(CRUD.store()).check()
+                result = InboxChecker(CRUD.store(), data_dir=SEND.DATA_DIR).check()
                 HUB.log(
                     f"Входящие: чатов {result['chats']}, с непрочитанными {result['unread']}, "
                     f"пометили «ответил» {len(result['marked'])}"

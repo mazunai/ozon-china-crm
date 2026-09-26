@@ -202,6 +202,15 @@ def _browser_lost(exc: Exception) -> bool:
     return any(marker in text for marker in _BROWSER_LOST_MARKERS)
 
 
+class NoChatAvailable(Exception):
+    """У продавца нельзя открыть чат: личка закрыта или чат не открылся.
+
+    Это не сбой отправки — продавец не получит сообщение ни при каких
+    повторах. Такие записи уходят в «пропущен» сразу, чтобы очередь шла
+    дальше, а причина остаётся в last_error.
+    """
+
+
 # --- Работа с браузером ---------------------------------------------------
 
 
@@ -273,20 +282,55 @@ class ChatClient:
 
         Раньше открывалась карточка товара и искалась кнопка «Чат» — теперь
         товар не нужен, достаточно seller_id.
+
+        Если кнопки нет — у продавца закрыты личные сообщения: это не сбой,
+        повторами не лечится, кидаем NoChatAvailable, чтобы очередь шла дальше.
+        Поле ввода, не появившееся после клика, пробуем второй раз: чат иногда
+        не раскрывается с первого открытия страницы.
         """
-        self._focus()
-        self.driver.get(f"https://www.ozon.ru/seller/{seller_id}/")
-        self._focus()
-        button = self.wait_for(self.selectors.chat_button)
-        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
-        time.sleep(0.5)
-        try:
-            button.click()
-        except Exception:
-            # Кнопку может перекрывать другой элемент — жмём через JS
-            self.driver.execute_script("arguments[0].click();", button)
-        # Ждём поле ввода: значит чат действительно открылся
-        self.wait_for(self.selectors.message_input, timeout=max(self.wait_seconds, 25))
+        from selenium.common.exceptions import TimeoutException
+
+        url = f"https://www.ozon.ru/seller/{seller_id}/"
+        for attempt in (1, 2):
+            self._focus()
+            self.driver.get(url)
+            self._focus()
+
+            button = None
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                found = self._find(self.selectors.chat_button)
+                if found:
+                    button = found[0]
+                    break
+                time.sleep(0.5)
+            if button is None:
+                raise NoChatAvailable(
+                    "нет кнопки «Написать» — личные сообщения закрыты"
+                )
+
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", button)
+            time.sleep(0.5)
+            try:
+                button.click()
+            except Exception:
+                # Кнопку может перекрывать другой элемент — жмём через JS
+                self.driver.execute_script("arguments[0].click();", button)
+
+            # Ждём поле ввода: значит чат действительно открылся
+            try:
+                self.wait_for(
+                    self.selectors.message_input,
+                    timeout=max(self.wait_seconds, 25),
+                )
+                return
+            except TimeoutException:
+                if attempt == 2:
+                    raise NoChatAvailable(
+                        "чат не открылся: поле ввода не появилось"
+                    )
+                time.sleep(2)
 
     def send(self, text: str) -> None:
         """Печатает текст и нажимает отправку.
@@ -296,7 +340,12 @@ class ChatClient:
         """
         self._focus()
         field = self.wait_for(self.selectors.message_input)
-        field.click()
+        try:
+            field.click()
+        except Exception:
+            # Поле иногда перекрыто шапкой чата — обычный клик перехватывается.
+            # Клик через JS ставит фокус так же, перехват не страшен.
+            self.driver.execute_script("arguments[0].click();", field)
         # ВАЖНО: текст ставим значением через JS, а НЕ send_keys.
         #
         # send_keys трактует "\n" как Enter, а Enter в чате Ozon отправляет
@@ -602,7 +651,7 @@ def run_queue(
     Если `once=True` — делает не больше одной отправки и выходит (удобно для
     ручной проверки, что всё настроено верно).
     """
-    report = {"sent": 0, "failed": 0, "stopped_reason": "", "dry_run": config.dry_run}
+    report = {"sent": 0, "failed": 0, "skipped": 0, "stopped_reason": "", "dry_run": config.dry_run}
     stop_file = data_dir / config.stop_file
     next_allowed_at: Optional[datetime] = None
 
@@ -771,6 +820,16 @@ def run_queue(
                         queue.log_message(seller_id, message, "failed", "не подтвердилась отправка")
                     report["failed"] += 1
                     emit("failed", seller_id=seller_id, shop=shop, error="не подтвердилась отправка")
+                    break
+                except NoChatAvailable as exc:
+                    # Личка закрыта или чат не открылся: повторами не лечится.
+                    # Уходим к следующему сразу, не сжигая время и попытки.
+                    queue.mark_skipped(seller_id, str(exc))
+                    if hasattr(queue, "log_message"):
+                        queue.log_message(seller_id, message, "skipped", str(exc))
+                    report["skipped"] += 1
+                    progress(f"Пропущен {shop}: {exc}")
+                    emit("skipped", seller_id=seller_id, shop=shop, error=str(exc)[:200])
                     break
                 except Exception as exc:                   # noqa: BLE001
                     if _browser_lost(exc) and browser_attempts < 2:

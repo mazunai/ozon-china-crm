@@ -424,6 +424,7 @@
         <span class="spacer"></span>
         <span class="pill" id="sendPill">—</span>
         <button class="ghost" id="btnCheckLogin">Проверить вход в Ozon</button>
+        <button class="ghost" id="btnCheckInbox">Проверить ответы</button>
         <button class="ghost" id="btnSendRefresh">Перепроверить</button>
       </div>
       <div id="sendChecks" style="margin-top:12px"></div>
@@ -1463,6 +1464,8 @@
         if (ev.last_event && ev.last_event.kind === "sent") {
           toast("Отправлено: " + (ev.last_event.shop || ""), "ok");
           loadStats();
+        } else if (ev.last_event && ev.last_event.kind === "skipped") {
+          toast("Пропущен (нет чата): " + (ev.last_event.shop || ""));
         }
       }
       else if (ev.type === "send_done") {
@@ -1658,8 +1661,10 @@
     $("sendPhase").textContent = (st && st.phase) || "—";
     if (st && st.error) {
       $("sendMeta").innerHTML = '<span style="color:var(--err)">' + esc(st.error) + "</span>";
-    } else if (st && (st.sent || st.failed)) {
-      $("sendMeta").textContent = "Отправлено " + st.sent + ", ошибок " + st.failed +
+    } else if (st && (st.sent || st.failed || st.skipped)) {
+      $("sendMeta").textContent = "Отправлено " + (st.sent || 0) +
+        ", ошибок " + (st.failed || 0) +
+        (st.skipped ? ", пропущено (нет чата) " + st.skipped : "") +
         (st.stopped_reason ? " — " + st.stopped_reason : "");
     }
     if (running) {
@@ -1764,6 +1769,30 @@
       btn.disabled = false;
       btn.textContent = "Проверить вход в Ozon";
       loadSend();
+    });
+  });
+  $("btnCheckInbox").addEventListener("click", function(){
+    // Открывает список чатов Ozon и помечает «ответил» тем, у кого
+    // появились непрочитанные входящие.
+    var btn = $("btnCheckInbox");
+    btn.disabled = true;
+    btn.textContent = "Проверяю…";
+    postJson("/api/inbox/check", {}).then(function(res){
+      if (res.unread) {
+        var names = (res.marked || []).map(function(m){ return m.shop; })
+          .concat(res.unmatched || []);
+        toast("Новых ответов: " + res.unread +
+          (res.marked && res.marked.length ? " — помечен «ответил»: " + res.marked.length : "") +
+          (names.length ? " · " + names.join(", ") : ""), "ok");
+      } else {
+        toast("Непрочитанных ответов нет", "ok");
+      }
+      if (res.marked && res.marked.length) { loadTable("sellers"); loadStats(); }
+    }).catch(function(err){
+      toast("Не удалось проверить: " + err.message, "err");
+    }).then(function(){
+      btn.disabled = false;
+      btn.textContent = "Проверить ответы";
     });
   });
   $("btnSaveSettings").addEventListener("click", function(){

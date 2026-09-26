@@ -1,0 +1,13 @@
+[Unit]
+# Бэкап дважды в день: утром после ночного сбора (09:30) и вечером (21:30).
+# Persistent=true — если ВМ была выключена в момент запуска, снимок догонит.
+Description=Ozon CRM: расписание бэкапов базы (09:30 и 21:30)
+
+[Timer]
+OnCalendar=*-*-* 09,21:30:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=parser-backup.service
+
+[Install]
+WantedBy=timers.target

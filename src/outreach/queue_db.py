@@ -218,12 +218,19 @@ class OutreachQueue:
             )
         logger.info(f"В стоп-лист: {seller_id}")
 
-    def mark_skipped(self, seller_id: str) -> None:
+    def mark_skipped(self, seller_id: str, reason: str = "") -> None:
+        """Пропуск без повтора: личка закрыта, чат не открылся.
+
+        Причина сохраняется в last_error — в дашборде видно, почему продавец
+        не получил сообщение.
+        """
         with self._connect() as conn:
             conn.execute(
-                "UPDATE sellers SET status = ?, updated_at = ? WHERE seller_id = ?",
-                (STATUS_SKIPPED, _now(), seller_id),
+                "UPDATE sellers SET status = ?, last_error = ?, updated_at = ? "
+                "WHERE seller_id = ?",
+                (STATUS_SKIPPED, (reason or "пропущен")[:500], _now(), seller_id),
             )
+        logger.warning(f"Пропущен: {seller_id} — {reason[:200]}")
 
     def release_stale(self, older_than_minutes: int = 30) -> int:
         """Возвращает в очередь зависшие «в работе» записи.

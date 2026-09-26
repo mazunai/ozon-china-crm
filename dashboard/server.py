@@ -869,6 +869,9 @@ class SendRunner:
             elif kind == "failed":
                 self.state["failed"] += 1
                 self.state["phase"] = f"Ошибка: {payload.get('shop', '')}"
+            elif kind == "skipped":
+                self.state["skipped"] = self.state.get("skipped", 0) + 1
+                self.state["phase"] = f"Пропущен: {payload.get('shop', '')}"
             elif kind == "sending":
                 self.state["phase"] = f"Пишу: {payload.get('shop', '')}"
             elif kind == "waiting":
@@ -892,10 +895,12 @@ class SendRunner:
                 "running": False, "phase": "Готово",
                 "sent": report.get("sent", self.state["sent"]),
                 "failed": report.get("failed", self.state["failed"]),
+                "skipped": report.get("skipped", self.state.get("skipped", 0)),
                 "stopped_reason": report.get("stopped_reason", ""),
                 "finished_at": time.time(),
             })
             log(f"Отправка завершена: отправлено {self.state['sent']}, ошибок {self.state['failed']}"
+                + (f", пропущено {self.state['skipped']}" if self.state.get("skipped") else "")
                 + (f" ({self.state['stopped_reason']})" if self.state.get("stopped_reason") else ""))
             HUB.publish({"type": "send", **self.state})
             HUB.publish({"type": "send_done", "stats": self.state})
@@ -1737,6 +1742,26 @@ class Handler(BaseHTTPRequestHandler):
             from src.outreach.sender import check_login_live
             live = check_login_live(SEND.DATA_DIR, on_progress=HUB.log)
             return self._send_json(live)
+
+        if path == "/api/inbox/check":
+            # Проверка входящих открывает вкладку в общем Chrome: как и сбор
+            # с отправкой, держит замок, чтобы задачи не мешали друг другу.
+            if not BROWSER_LOCK.acquire(blocking=False):
+                return self._send_json(
+                    {"error": "Браузер занят другой задачей — дождитесь её завершения"}, 400)
+            try:
+                from src.crm.inbox import InboxChecker
+                result = InboxChecker(CRUD.store()).check()
+                HUB.log(
+                    f"Входящие: чатов {result['chats']}, с непрочитанными {result['unread']}, "
+                    f"пометили «ответил» {len(result['marked'])}"
+                    + (f", не совпали с базой: {', '.join(result['unmatched'])}"
+                       if result["unmatched"] else ""))
+            except Exception as exc:                      # noqa: BLE001
+                return self._send_json({"error": f"Не удалось проверить: {exc}"}, 500)
+            finally:
+                BROWSER_LOCK.release()
+            return self._send_json(result)
 
         if path == "/api/send/template":
             result = SEND.save_template(str(data.get("body", "")))

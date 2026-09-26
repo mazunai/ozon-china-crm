@@ -703,6 +703,20 @@ class SellerStore:
                 (seller_id, text, _now(), result, _json.dumps(error[:300], ensure_ascii=False)[1:-1]),
             )
 
+    def find_seller_by_shop(self, shop_name: str) -> Optional[sqlite3.Row]:
+        """Продавец по имени магазина (без учёта регистра).
+
+        Нужно для проверки входящих: Ozon в списке чатов отдаёт имя магазина,
+        а не seller_id. Если витрин с таким именем несколько — берём первую
+        по score.
+        """
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT seller_id, status, shop_name FROM sellers "
+                "WHERE lower(shop_name) = lower(?) ORDER BY score DESC LIMIT 1",
+                (shop_name.strip(),),
+            ).fetchone()
+
     def message_history(self, seller_id: str, limit: int = 50) -> List[sqlite3.Row]:
         """История переписки с продавцом, свежие сверху."""
         with self._connect() as conn:

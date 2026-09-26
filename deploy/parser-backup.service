@@ -1,0 +1,14 @@
+[Unit]
+# Снимок базы продавцов через sqlite3.Connection.backup() (не копирование
+# файла: снимок не ловит базу в середине транзакции). Ротация: хранятся
+# последние 20 снимков в data/backups/ — их и показывает дашборд
+# («бэкап» в шапке).
+Description=Ozon CRM: резервный снимок базы продавцов
+After=network.target
+
+[Service]
+Type=oneshot
+User=yc-user
+Group=yc-user
+WorkingDirectory=/home/yc-user/parser
+ExecStart=/home/yc-user/parser/.venv/bin/python /home/yc-user/parser/tools/backup_db.py

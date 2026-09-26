@@ -19,6 +19,27 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+def _api_base() -> str:
+    """Базовый адрес Bot API. По умолчанию официальный; если с хоста Telegram
+    недоступен (блокировка маршрута), в .env можно указать релей:
+    TELEGRAM_API_BASE=https://ваш-воркер.workers.dev"""
+    base = os.environ.get("TELEGRAM_API_BASE", "").strip()
+    if base:
+        return base.rstrip("/").removesuffix("/bot")
+    env_path = REPO_ROOT / ".env"
+    if env_path.exists():
+        try:
+            for raw in env_path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if line.startswith("TELEGRAM_API_BASE="):
+                    base = line.split("=", 1)[1].strip()
+                    if base:
+                        return base.rstrip("/").removesuffix("/bot")
+        except OSError:
+            pass
+    return "https://api.telegram.org"
+
+
 def _credentials() -> tuple:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -55,7 +76,7 @@ def send(text: str) -> bool:
     }).encode("utf-8")
     try:
         request = urllib.request.Request(
-            f"https://api.telegram.org/bot{token}/sendMessage",
+            f"{_api_base()}/bot{token}/sendMessage",
             data=payload,
             headers={"Content-Type": "application/json"},
         )

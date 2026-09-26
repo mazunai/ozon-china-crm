@@ -234,6 +234,12 @@
     border-radius:50%;border:1px solid var(--line);background:var(--card2);color:var(--dim);
     font-size:18px;line-height:1;cursor:pointer;transition:border-color .15s,color .15s;z-index:2}
   .drawer-close:hover{color:var(--text);border-color:#3c4556}
+  /* Категория/стадия: два ровных столбца одной высоты вместо кривых инлайн-ширин */
+  .drawer-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+  .drawer-fields .check{flex-direction:column;align-items:flex-start;gap:5px}
+  .drawer-fields select{width:100%;min-height:38px;font-size:13px;color:var(--text);
+    padding:8px 26px 8px 10px}
+  .drawer-fields .muted{grid-column:1/-1}
   .drawer.open{transform:translateX(0)}
   .drawer h3{margin:0 0 4px;font-size:16px}
   .drawer dl{display:grid;grid-template-columns:150px 1fr;gap:6px 12px;margin:14px 0;font-size:13px}
@@ -337,6 +343,7 @@
     #bulkRow .muted{flex:1 1 100%}
     .drawer{width:100%;max-width:100%;padding:16px;padding-bottom:calc(24px + env(safe-area-inset-bottom))}
     .drawer dl{grid-template-columns:112px 1fr}
+    .drawer-fields{grid-template-columns:1fr}
     .reasons{font-size:13px}
     .toasts{left:12px;right:12px;bottom:calc(14px + env(safe-area-inset-bottom));max-width:none}
     .toast{font-size:14px;padding:12px 14px}
@@ -1306,13 +1313,13 @@
           return '<option value="' + key + '"' + (key === d.reply_category ? " selected" : "") + ">" +
             esc(REPLY_LABELS[key]) + "</option>";
         }).join("");
-        html += '<div class="row" style="margin-top:14px;align-items:center;flex-wrap:wrap;gap:10px">' +
-          '<label class="check">категория ' +
-            '<select id="stCategory" class="sel-category" style="min-width:210px">' +
+        html += '<div class="drawer-fields">' +
+          '<label class="check">категория' +
+            '<select id="stCategory" class="sel-category">' +
               '<option value=""' + (!d.reply_category ? " selected" : "") + '>— не задана —</option>' +
               catOptions + "</select></label>" +
-          '<label class="check">стадия ' +
-            '<select id="stStage" style="min-width:130px">' +
+          '<label class="check">стадия' +
+            '<select id="stStage" class="sel-category">' +
               '<option value="">—</option>' +
               '<option value="negotiation"' + (d.stage === "negotiation" ? " selected" : "") + '>переговоры</option>' +
               '<option value="deal"' + (d.stage === "deal" ? " selected" : "") + '>сделка</option>' +

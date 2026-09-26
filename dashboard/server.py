@@ -561,19 +561,37 @@ class NightHarvest:
         except (OSError, ValueError):
             state = {}
         totals = state.get("totals") or {}
+        log_lines = self._tail()
+        # «Сбор жив?» — вопрос, который возникает сразу, если лог подолгу не
+        # меняется: показываем время последней записи и страницу, на которой
+        # сборщик находится прямо сейчас.
+        log_updated = ""
+        try:
+            log_updated = datetime.fromtimestamp(
+                self._log_path().stat().st_mtime).isoformat(timespec="seconds")
+        except OSError:
+            log_updated = ""
+        current_page = 0
+        for line in reversed(log_lines):
+            found = re.search(r"Страница (\d+):", line)
+            if found:
+                current_page = int(found.group(1))
+                break
         return {
             "running": self.running(),
             "stop_requested": self.STOP_FILE.exists(),
             "next_page": int(state.get("next_page") or 1),
+            "current_page": current_page,
             "chunks_done": int(state.get("chunks_done") or 0),
             "updated_at": state.get("updated_at") or "",
+            "log_updated_at": log_updated,
             "days": {
                 "products": int(totals.get("products") or 0),
                 "sellers": int(totals.get("sellers") or 0),
                 "uscc": int(totals.get("uscc") or 0),
                 "errors": int(totals.get("errors") or 0),
             },
-            "log": self._tail(),
+            "log": log_lines,
         }
 
     def start(self, chunk_pages: int, until: str, pause: float, refresh_days: int) -> None:

@@ -54,7 +54,11 @@ _stopping = False
 
 def log(message: str, log_file: Path) -> None:
     """Строка с временем и в stdout (journald), и в файл ночи."""
-    line = f"[{datetime.now().strftime('%d.%m %H:%M:%S')}] {message}"
+    write_raw(f"[{datetime.now().strftime('%d.%m %H:%M:%S')}] {message}", log_file)
+
+
+def write_raw(line: str, log_file: Path) -> None:
+    """Готовая строка — как есть: вывод сборщика уже со своими датами."""
     print(line, flush=True)
     try:
         with log_file.open("a", encoding="utf-8") as handle:
@@ -170,7 +174,13 @@ def dashboard_busy(base_url: str) -> str:
 
 
 def run_chunk(args, page: int, log_file: Path) -> tuple:
-    """Один чанк сбора. Возвращает (итог или None, признак ошибки)."""
+    """Один чанк сбора. Возвращает (итог или None, признак ошибки).
+
+    Вывод сборщика читаем построчно и сразу пишем в лог: по нему видно, что
+    обход живёт (в дашборде это хвост лога, он обновляется по таймеру).
+    Раньше вывод копился в памяти и появлялся только в конце чанка — при
+    проходе в сотню страниц это выглядело как «сбор не работает».
+    """
     command = [
         PYTHON, str(REPO_ROOT / "run_harvest.py"), "harvest",
         "--url", args.url,
@@ -183,27 +193,37 @@ def run_chunk(args, page: int, log_file: Path) -> tuple:
     log(f"чанк: страницы {page}–{page + args.chunk_pages - 1}", log_file)
     started = time.time()
     try:
-        process = subprocess.run(
-            command, cwd=str(REPO_ROOT), capture_output=True, text=True,
-            timeout=args.chunk_timeout,
+        process = subprocess.Popen(
+            command, cwd=str(REPO_ROOT), stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1,
         )
-    except subprocess.TimeoutExpired:
-        log(f"чанк не уложился в {args.chunk_timeout} с — прерываю его", log_file)
+    except OSError as exc:
+        log(f"сбор не запустился: {exc}", log_file)
         return None, True
 
-    output = (process.stdout or "") + (process.stderr or "")
-    # Хвост вывода — в лог: по нему видно, на чём именно споткнулись
-    tail = [line for line in output.strip().splitlines() if line.strip()][-6:]
-    for line in tail:
-        log("  " + line, log_file)
-
     stats = None
-    for line in output.splitlines():
+    deadline = started + args.chunk_timeout
+    previous = ""
+    for line in process.stdout:
+        line = line.rstrip()
+        if not line or line == previous:
+            # Одна и та же строка приходит и в stdout, и через logging —
+            # второй раз её в лог не пишем
+            continue
+        previous = line
         if line.startswith("HARVEST_JSON "):
             try:
                 stats = json.loads(line[len("HARVEST_JSON "):])
             except ValueError:
                 stats = None
+            continue
+        write_raw(line, log_file)
+        if time.time() > deadline:
+            process.kill()
+            log(f"чанк не уложился в {args.chunk_timeout} с — прерываю его", log_file)
+            return None, True
+    process.wait()
+
     took = int(time.time() - started)
     if stats is None:
         log(f"чанк упал за {took} с, код {process.returncode}", log_file)

@@ -553,6 +553,7 @@
         <span class="pill" id="nightPill">не идёт</span>
         <button class="ghost" id="btnNightRefresh">Обновить</button>
       </div>
+      <div class="muted" id="nightFresh" style="margin-top:6px"></div>
       <div class="muted" style="margin-top:8px">
         Идёт порциями: между порциями пауза, при сбое повторяет ту же страницу,
         пройденное запоминает — после перезапуска продолжит с места остановки.
@@ -1186,12 +1187,25 @@
 
     var d = n.days || {};
     $("nightStats").innerHTML =
+      kpiCard("kp-blue", "Сейчас на странице", n.current_page || "—", "идёт обход прямо сейчас") +
       kpiCard("kp-blue", "Следующая страница", n.next_page, "с неё продолжит") +
       kpiCard("kp-ok", "Продавцов за ночь", d.sellers, "найдено и обновлено") +
       kpiCard("kp-purple", "Товаров", d.products, "просмотрено карточек") +
       kpiCard("kp-blue", "Проходов", n.chunks_done, "порций подряд") +
       kpiCard("kp-ok", "USCC подтверждено", d.uscc, "по реквизитам") +
       kpiCard("kp-err", "Ошибок", d.errors, "записей с ошибкой");
+
+    // Свежесть лога: по ней сразу видно, что сбор живёт, а не встал
+    if (n.log_updated_at) {
+      var seconds = Math.round((Date.now() - new Date(n.log_updated_at).getTime()) / 1000);
+      var ago = seconds < 5 ? "только что"
+        : seconds < 90 ? (seconds + " сек назад")
+        : (Math.round(seconds / 60) + " мин назад");
+      $("nightFresh").textContent = "Сбор пишет в лог: " + ago +
+        (n.current_page ? " · идёт страница " + n.current_page : "");
+    } else {
+      $("nightFresh").textContent = "";
+    }
 
     var lines = n.log || [];
     $("nightLog").innerHTML = lines.length

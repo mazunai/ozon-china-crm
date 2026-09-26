@@ -869,6 +869,60 @@ def save_harvest_settings(data: dict) -> dict:
     return settings
 
 
+def resume_night_after_restart() -> Optional[str]:
+    """Продолжает ночной сбор, убитый перезапуском дашборда.
+
+    Ночной сбор — дочерний процесс дашборда и живёт в его systemd-cgroup:
+    рестарт службы убивает его, причём двумя способами. SIGKILL (KillMode
+    по умолчанию) убивает мгновенно — lock остаётся, стейт свежий. SIGTERM
+    скрипт обрабатывает штатно: доигрывает шаг, снимает lock, пишет «финиш»
+    — и внешне это неотличимо от планового завершения. Различаем так:
+
+    * процесс жив — не мешаем;
+    * стоп-кран стоит — пользователь просил остановить, не возобновляем;
+    * в хвосте лога есть «время вышло» / «достигнут предел» — сбор закончился
+      сам по своей остановке времени, не возобновляем;
+    * прогресс (state.updated_at) свежее трёх часов и завершения не было —
+      значит убили посреди работы: продолжаем с сохранёнными настройками,
+      скрипт начинает с последней записанной в стейт страницы.
+    """
+    if NIGHT.running():
+        return None
+    if NIGHT.STOP_FILE.exists():
+        # Пользователь просил остановить — уважаем стоп-кран
+        NIGHT.LOCK_FILE.unlink(missing_ok=True)
+        return None
+
+    try:
+        updated = NIGHT.status().get("updated_at") or ""
+        fresh = updated and (
+            datetime.now() - datetime.fromisoformat(updated)
+        ).total_seconds() < 3 * 3600
+    except (ValueError, OSError):
+        fresh = False
+    if not fresh:
+        return None
+
+    # Штатное завершение видно по хвосту лога: без него любой перезапуск
+    # дашборда возобновлял бы сбор до бесконечности
+    tail = " ".join(NIGHT._tail(8))
+    finished_naturally = ("время вышло" in tail) or ("достигнут предел" in tail)
+    if "финиш:" in tail and finished_naturally:
+        return None
+
+    # Мёртвый lock не должен блокировать новый запуск скрипта
+    NIGHT.LOCK_FILE.unlink(missing_ok=True)
+    night = load_harvest_settings()["night"]
+    NIGHT.start(
+        chunk_pages=night["chunk_pages"], until=night["until"], pause=night["pause"],
+        refresh_days=night["refresh_days"], url=night["url"],
+    )
+    return (
+        f"Ночной сбор пережил перезапуск дашборда — продолжен с его настроек "
+        f"(до {night['until']}, порции по {night['chunk_pages']} страниц)"
+    )
+
+
 class InboxAuto:
     """Автопроверка входящих чатов по расписанию: раз в 30 минут.
 
@@ -2379,6 +2433,10 @@ def main() -> None:
 
     SERVICE.check_parser()
     INBOX_AUTO.start()
+    resumed = resume_night_after_restart()
+    if resumed:
+        # В HUB попадёт через HubLogHandler: прямой вызов продублировал бы строку
+        logging.getLogger(__name__).info(resumed)
     if args.open or is_local:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 

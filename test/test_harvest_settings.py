@@ -170,6 +170,96 @@ def test_parse_live():
     check(live["phase"] == "" and live["page"] == 0, "пустой лог — фаза не определена")
 
 
+def test_resume_after_restart(tmp: Path):
+    print("Ночной сбор переживает перезапуск дашборда")
+    import os
+    from datetime import datetime, timedelta
+
+    night = server.NIGHT
+    night.STATE_FILE = tmp / "night_state.json"
+    night.STOP_FILE = tmp / "night.stop"
+    night.LOCK_FILE = tmp / "night.lock"
+    night.LOG_DIR = tmp
+    server.HARVEST_SETTINGS_FILE = tmp / "settings.json"
+    server.save_harvest_settings({"night": {
+        "url": "https://www.ozon.ru/category/noutbuki-15692/",
+        "chunk_pages": 7, "until": "06:00", "pause": 90, "refresh_days": 5,
+    }})
+
+    started = {}
+
+    def fake_start(**kwargs):
+        started.update(kwargs)
+
+    real_start = night.start
+    night.start = fake_start
+    night_log = tmp / datetime.now().strftime("night_harvest_%Y-%m-%d.log")
+
+    def write_state(fresh=True):
+        moment = datetime.now() if fresh else datetime.now() - timedelta(hours=2)
+        (tmp / "night_state.json").write_text(json.dumps({
+            "next_page": 321,
+            "updated_at": moment.isoformat(timespec="seconds"),
+        }), encoding="utf-8")
+
+    try:
+        # 1) убит SIGKILL'ом (lock остался, финиша нет) → продолжаем
+        write_state(fresh=True)
+        (tmp / "night.lock").write_text("999999", encoding="utf-8")
+        night_log.write_text(
+            "[26.09 18:00:01] чанк: страницы 321–420\n"
+            "Страница 322: товаров на странице 8, новых 8\n",
+            encoding="utf-8")
+        message = server.resume_night_after_restart()
+        check(bool(message) and started.get("chunk_pages") == 7
+              and started.get("until") == "06:00" and started.get("refresh_days") == 5,
+              "убитый без финиша ночной сбор продолжен с настройками")
+
+        # 2) убит SIGTERM'ом (финиш есть, но стоп-крана и «время вышло» нет) →
+        #    тоже продолжаем: рестарт дашборда не должен отменять ночь
+        started.clear()
+        write_state(fresh=True)
+        night_log.write_text(
+            "[26.09 18:10:13] остановка по сигналу\n"
+            "[26.09 18:10:13] финиш: чанков 2, товаров 0, продавцов 0\n",
+            encoding="utf-8")
+        (tmp / "night.lock").unlink(missing_ok=True)
+        message = server.resume_night_after_restart()
+        check(bool(message) and started.get("chunk_pages") == 7,
+              "SIGTERM-убийство (финиш без причины остановки) тоже возобновляется")
+
+        # 3) живой pid в lock (реальный запуск) → не мешаем
+        started.clear()
+        (tmp / "night.lock").write_text(str(os.getpid()), encoding="utf-8")
+        check(server.resume_night_after_restart() is None and not started,
+              "живой ночной сбор не трогается")
+
+        # 4) стоп-кран → возобновления нет
+        started.clear()
+        (tmp / "night.lock").unlink(missing_ok=True)
+        (tmp / "night.stop").write_text("стоп\n", encoding="utf-8")
+        check(server.resume_night_after_restart() is None and not started,
+              "стоп-кран уважается: сбор не возобновляется")
+        (tmp / "night.stop").unlink()
+
+        # 5) сбор закончился сам («время вышло») → не возобновляем
+        started.clear()
+        night_log.write_text(
+            "[26.09 06:00:02] время вышло — завершаю\n"
+            "[26.09 06:00:02] финиш: чанков 9, товаров 540, продавцов 1200\n",
+            encoding="utf-8")
+        check(server.resume_night_after_restart() is None and not started,
+              "штатное завершение по времени не возобновляется")
+
+        # 6) прогресс устарел (>3 часов) → не возобновляем
+        started.clear()
+        write_state(fresh=False)
+        check(server.resume_night_after_restart() is None and not started,
+              "устаревший прогресс не возобновляется")
+    finally:
+        night.start = real_start
+
+
 def run():
     with tempfile.TemporaryDirectory() as raw_tmp:
         tmp = Path(raw_tmp)
@@ -177,6 +267,7 @@ def run():
         test_validation(tmp)
         test_night_status_idle(tmp)
         test_parse_live()
+        test_resume_after_restart(tmp)
     print(f"\nРезультат: {PASSED}/{TOTAL} кейсов прошло")
     return 0 if PASSED == TOTAL else 1
 

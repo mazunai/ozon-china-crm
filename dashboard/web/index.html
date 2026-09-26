@@ -1180,10 +1180,14 @@
               box.innerHTML = '<div class="muted">Отправок не было</div>';
               return;
             }
-            box.innerHTML = '<div class="muted">История отправок (' + rows.length + ")</div>" +
+            box.innerHTML = '<div class="muted">История переписки (' + rows.length + ")</div>" +
               rows.map(function(m){
-                var mark = m.result === "sent" ? "отправлено" : "ошибка";
-                var color = m.result === "sent" ? "var(--ok)" : "var(--err)";
+                var mark = m.result === "sent" ? "отправлено"
+                  : m.result === "received" ? "ответил"
+                  : "не доставлено";
+                var color = m.result === "sent" ? "var(--ok)"
+                  : m.result === "received" ? "var(--purple)"
+                  : "var(--err)";
                 return '<div class="reasons" style="margin-top:6px">' +
                   '<span style="color:' + color + '">' + mark + "</span> · " +
                   esc(fmtDate(m.sent_at)) +

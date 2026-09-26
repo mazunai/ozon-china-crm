@@ -2432,7 +2432,24 @@ def main() -> None:
     print(f"\n  Дашборд Ozon-парсера: {url}\n  Остановка: Ctrl+C\n", flush=True)
 
     SERVICE.check_parser()
-    INBOX_AUTO.start()
+    # Автопроверка чатов открывает браузер с Ozon: на машине, где дашборд
+    # нужен только для правок кода (OZON_INBOX_AUTO=0 в config.txt или env),
+    # её отключают — иначе Chrome с Ozon выскакивает каждые полчаса.
+    inbox_disabled = False
+    try:
+        from src.utils.config_loader import read_config
+
+        raw = (os.environ.get("OZON_INBOX_AUTO")
+               or (read_config().get("OZON_INBOX_AUTO") or "")).strip().lower()
+        inbox_disabled = raw in ("0", "false", "no", "off")
+    except Exception:                                        # noqa: BLE001
+        pass
+    if inbox_disabled:
+        logging.getLogger(__name__).info(
+            "Автопроверка чатов отключена (OZON_INBOX_AUTO=0)")
+        HUB.log("Автопроверка чатов отключена (OZON_INBOX_AUTO=0)")
+    else:
+        INBOX_AUTO.start()
     resumed = resume_night_after_restart()
     if resumed:
         # В HUB попадёт через HubLogHandler: прямой вызов продублировал бы строку

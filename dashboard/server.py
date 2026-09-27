@@ -1841,7 +1841,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Клиент отключился до чтения ответа: фоновые скрипты проверяют
+            # занятость перед каждым шагом и закрывают соединение сразу после
+            # отправки запроса. Запрос обработан, ответ доставить некому —
+            # это не ошибка сервера, и трейсбеками её не лечат.
+            logging.getLogger(__name__).debug("Клиент отключился до получения ответа")
 
     def _send_file(self, path: Path, content_type: str) -> None:
         if not path.exists():

@@ -9,6 +9,7 @@
 
 import json
 import logging
+import logging.handlers
 import os
 import threading
 import time
@@ -203,7 +204,9 @@ class WorkerRuntime:
         log_file = Settings.LOGS_DIR / (
             f"worker_{self.marketplace}_{datetime.now():%Y-%m-%d}.log"
         )
-        handler = logging.FileHandler(log_file, encoding="utf-8")
+        # Ротация: лог воркера пишется всю ночь без присмотра (аудит)
+        handler = logging.handlers.RotatingFileHandler(
+            log_file, encoding="utf-8", maxBytes=5 * 1024 * 1024, backupCount=2)
         handler.setFormatter(
             logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         )

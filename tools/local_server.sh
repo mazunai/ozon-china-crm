@@ -24,6 +24,8 @@ start() {
     return 0
   fi
   mkdir -p logs data
+  # Логи старше 30 дней не нужны: без чистки каталог рос вечно (аудит)
+  find logs -type f -name "*.log" -mtime +30 -delete 2>/dev/null || true
   # BROWSER=none — чтобы каждый start/restart не открывал новую вкладку
   # браузера: адрес и так напечатан ниже
   nohup env BROWSER=none .venv/bin/python dashboard/server.py \

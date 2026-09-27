@@ -9,6 +9,7 @@
 - **Бэкапы**: restore требует остановленный дашборд и снимает safety через Connection.backup (в WAL копия файла пуста/битая); проверка свободного места перед снимком; messages.csv в офсайт-выгрузке; parser-backup.service получил --push; launchd-таймер на Mac (deploy/mac/).
 - **Инструменты**: deploy_vm.sh — полный pip install, exclude backups/, health по https, зафиксирован host key (deploy/vm_known_hosts); vm_tunnel.sh переписан на актуальную VM с pid-файлом; night_harvest — атомарная запись стейта, видит ретро-проход, докстринг без мёртвого таймера; локальный дашборд не открывает чат при ночном сборе.
 - **Типографика**: строки-полоски (fb-bar) — счётчик одной строкой без переносов, заливка всегда видна, трек тоньше; убран дубликат ovRepliesAuto.
+- **Root cause BrokenPipe найден аудитором**: `.fb-fill` был инлайн-элементом — width игнорировался, заливки не рисовались ни в одной полоске (display:block чинит все); harvest: запрещённый unicode_escape заменён на _decode_escapes; ротация лога воркера; чистка логов старше 30 дней.
 - Тесты: +test_dashboard_http (11: 401, замок перебора, purge/delete защита, сироты), backfill-протокол в test_harvest_settings (33), грид-ловушка в test_harvest, test_verify (6), handover CLI (поймал реальный краш `_shop` на sqlite3.Row). Полный набор — 12 файлов, ~180 кейсов.
 
 

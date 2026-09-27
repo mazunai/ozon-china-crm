@@ -508,12 +508,10 @@ def parse_seller_modal(modal_json: Dict) -> dict:
         if not key.startswith("textBlock") or not isinstance(raw, str) or "<br>" not in raw:
             continue
         for text in re.findall(r'"text"\s*:\s*"((?:[^"\\]|\\.)*)"', raw):
-            decoded = text
-            if "\\u" in decoded:
-                try:
-                    decoded = decoded.encode().decode("unicode_escape", errors="ignore")
-                except Exception:
-                    pass
+            # _decode_escapes, а не unicode_escape: он съедает литеральную
+            # кириллицу (AGENTS.md §3.3.5) — компания/адрес превращались бы
+            # в mojibake, как только Ozon перестанет экранировать весь не-ASCII
+            decoded = _decode_escapes(text)
             if "<br>" not in decoded:
                 continue
             lines = [part.strip() for part in decoded.split("<br>") if part.strip()]

@@ -405,6 +405,11 @@
       <div class="muted" style="margin-top:8px">Кто отвечает на отзывы покупателей, а кто молчит — по сэмплу отзывов, снятому с карточек товаров при сборе. «Мало данных» — пока менее 3 рассмотренных отзывов; проценты считаются среди продавцов с достаточным сэмплом.</div>
     </div>
     <div class="card">
+      <h2>Ниши продавцов</h2>
+      <div id="ovNiches"><div class="muted">Загрузка…</div></div>
+      <div class="muted" style="margin-top:8px">Категории товаров — из хлебных крошек карточек. Показывает, в каких нишах база больше и какая ниша активнее идёт на контакт (доля ответивших).</div>
+    </div>
+    <div class="card">
       <h2>Ответили <span class="badge ok" id="ovRepliesCount"></span></h2>
       <div id="ovReplies"><div class="muted">Загрузка…</div></div>
       <div class="muted" id="ovRepliesAuto"></div>
@@ -449,6 +454,7 @@
           <option value="replies">только отвечающие</option>
           <option value="silent">только молчуны</option>
         </select>
+        <select id="fNiche"><option value="">все ниши</option></select>
         <button class="ghost" id="btnReset">Сбросить</button>
         <span class="spacer"></span>
         <button class="primary" id="btnQueue">Кому писать сегодня</button>
@@ -475,6 +481,7 @@
             <th data-sort="shop_name">Магазин</th>
             <th data-sort="company_name">Юрлицо</th>
             <th data-sort="province" style="width:116px">Провинция</th>
+            <th class="nosort" style="width:130px" title="Категория товара из хлебных крошек карточки">Ниша</th>
             <th data-sort="orders" style="width:96px">Заказы</th>
             <th data-sort="reviews" style="width:90px">Отзывы</th>
             <th data-sort="months_on_ozon" style="width:72px">Срок</th>
@@ -847,7 +854,7 @@
 
   /* ---------- состояние таблиц ---------- */
   var T = {
-    sellers: {limit:50, offset:0, search:"", statuses:[], provinces:[], tier:"", vitality:"",
+    sellers: {limit:50, offset:0, search:"", statuses:[], provinces:[], tier:"", vitality:"", niches:[],
               categories:[], order_by:"score", order:"desc", rows:[], total:0, verified_only:true},
     rejected:{limit:50, offset:0, search:"", statuses:[], provinces:[], tier:"none", vitality:"",
               categories:[], order_by:"score", order:"desc", rows:[], total:0, verified_only:false}
@@ -866,6 +873,7 @@
     if (t.provinces && t.provinces.length) p.set("province", t.provinces.join(","));
     if (t.categories && t.categories.length) p.set("category", t.categories.join(","));
     if (t.vitality) p.set("vitality", t.vitality);
+    if (t.niches && t.niches.length) p.set("niche", t.niches.join(","));
     if (MARKETPLACE === "wb") p.set("marketplace", "wb");
     return p;
   }
@@ -878,6 +886,7 @@
       t.provinces = $("fProvince").value ? [$("fProvince").value] : [];
       t.tier = $("fTier").value;
       t.vitality = $("fVitality").value;
+      t.niches = $("fNiche").value ? [$("fNiche").value] : [];
       // Спец-значение «все заинтересованные» — три категории сразу
       t.categories = $("fCategory").value === "__interested"
         ? ["positive", "interested", "needs_info"]
@@ -931,6 +940,14 @@
         $("fCategory").appendChild(o);
       });
       $("fCategory").dataset.filled = "1";
+    }
+    if (!$("fNiche").dataset.filled && data.niche_facets) {
+      data.niche_facets.slice(0, 40).forEach(function(pair){
+        var o = document.createElement("option");
+        o.value = pair[0]; o.textContent = pair[0] + " (" + pair[1] + ")";
+        $("fNiche").appendChild(o);
+      });
+      $("fNiche").dataset.filled = "1";
     }
     if (!$("fProvince").dataset.filled && data.provinces) {
       data.provinces.forEach(function(pair){
@@ -995,6 +1012,7 @@
       "<td>" + statusDot(r.status) + esc(r.shop_name || r.seller_id) + badge + multi + "</td>" +
       '<td class="wrap"><span class="muted">' + esc(r.company_name || "—") + "</span></td>" +
       "<td>" + esc(r.province || "—") + "</td>" +
+      '<td class="wrap"><span class="muted">' + esc(r.niche || "—") + "</span></td>" +
       "<td>" + fmtNum(r.orders) + "</td>" +
       "<td>" + fmtNum(r.reviews) + "</td>" +
       "<td>" + (r.months_on_ozon || 0) + " мес</td>" +
@@ -1057,6 +1075,7 @@
     var meta = ["оценка <b>" + (r.score || 0).toFixed(1) + "</b>"];
     if (r.last_reply_at) { meta.push('✉ <b>ответ ' + esc(fmtDate(r.last_reply_at)) + "</b>"); }
     if (vitalityText(r.vitality)) { meta.push(esc(vitalityText(r.vitality))); }
+    if (r.niche) { meta.push(esc(r.niche)); }
     if (r.province) { meta.push(esc(r.province)); }
     meta.push("заказы " + fmtNum(r.orders));
     meta.push("отзывы " + fmtNum(r.reviews));
@@ -1101,7 +1120,7 @@
 
     if (!t.rows.length) {
       empty.style.display = "block";
-      empty.innerHTML = (t.search || t.provinces.length || t.statuses.length || t.tier || t.vitality || (t.categories && t.categories.length))
+      empty.innerHTML = (t.search || t.provinces.length || t.statuses.length || t.tier || t.vitality || (t.niches && t.niches.length) || (t.categories && t.categories.length))
         ? "<div>Ничего не найдено по этим условиям.</div>"
         : (name === "sellers"
             ? "<div>База пуста. Откройте вкладку «Сбор» и соберите продавцов.</div>"
@@ -1935,6 +1954,26 @@
     '<span class="fb-track"></span><span class="fb-count">' + fmtNum(v.unknown || 0) + "</span></div>";
   }
 
+  // Ниши продавцов: категории из хлебных крошек + доля ответивших.
+  // Это ответ на вопрос «какая категория активнее идёт на контакт».
+  function renderNiches(){
+    var rows = STATS.niches || [];
+    var box = $("ovNiches");
+    if (!rows.length) {
+      box.innerHTML = '<div class="muted">Ниш пока нет — категории собираются с карточек товаров при обходе и ретро-проходом (tools/category_backfill.py).</div>';
+      return;
+    }
+    var max = Math.max.apply(null, rows.map(function(r){ return r.sellers; })) || 1;
+    box.innerHTML = rows.map(function(r){
+      var pct = r.sellers ? Math.round((r.replied || 0) / r.sellers * 100) : 0;
+      return '<div class="fb-bar kp-blue" title="' + esc(r.leaf) + ": " +
+        fmtNum(r.sellers) + ' продавцов"><span style="width:170px;color:var(--dim)">' +
+        esc(r.leaf) + '</span><span class="fb-track"><span class="fb-fill" style="width:' +
+        Math.max(2, Math.round(r.sellers / max * 100)) + '%"></span></span><span class="fb-count">' +
+        fmtNum(r.sellers) + " · ответило " + pct + "%</span></div>";
+    }).join("");
+  }
+
   // «Ответили»: реальные входящие из чатов — кто ответил и что написал.
   function renderReplies(){
     var rows = STATS.replies || [];
@@ -2151,11 +2190,13 @@
       STATS.commCounts = d.comm_counts || {};
       STATS.replyCounts = d.reply_counts || {};
       STATS.vitality = d.vitality_counts || {};
+      STATS.niches = d.niche_stats || [];
       renderOverview();
       renderCharts();
       renderRecent();
       renderFunnel();
       renderVitality();
+      renderNiches();
       renderReminders();
       renderReplies();
     }).catch(function(){});
@@ -2172,11 +2213,11 @@
     $("fSearch").value = "";
     $("fProvince").value = "";
     $("fTier").value = "";
-    $("fVitality").value = "";
+    $("fVitality").value = ""; $("fNiche").value = "";
     $("fStatus").value = status;
     $("fPageSize").value = "25";
     var t = T.sellers;
-    t.search = ""; t.provinces = []; t.tier = ""; t.vitality = ""; t.statuses = [status];
+    t.search = ""; t.provinces = []; t.tier = ""; t.vitality = ""; t.niches = []; t.statuses = [status];
     t.order_by = "score"; t.order = "desc"; t.offset = 0; t.limit = 25;
     showView("sellers");
     loadTable("sellers");
@@ -2276,7 +2317,7 @@
   });
 
   $("fSearch").addEventListener("input", function(){ T.sellers.offset = 0; debounce(loadTable, "sellers"); });  $("rSearch").addEventListener("input", function(){ T.rejected.offset = 0; debounce(loadTable, "rejected"); });
-  ["fStatus","fCategory","fProvince","fTier","fVitality"].forEach(function(id){
+  ["fStatus","fCategory","fProvince","fTier","fVitality","fNiche"].forEach(function(id){
     $(id).addEventListener("change", function(){ T.sellers.offset = 0; loadTable("sellers"); });
   });
   $("fPageSize").addEventListener("change", function(){
@@ -2286,9 +2327,9 @@
   });
   $("btnReset").addEventListener("click", function(){
     $("fSearch").value = ""; $("fStatus").value = ""; $("fProvince").value = "";
-    $("fTier").value = ""; $("fVitality").value = ""; $("fPageSize").value = "50"; $("fCategory").value = "";
+    $("fTier").value = ""; $("fVitality").value = ""; $("fNiche").value = ""; $("fPageSize").value = "50"; $("fCategory").value = "";
     var t = T.sellers;
-    t.search = ""; t.statuses = []; t.provinces = []; t.tier = ""; t.vitality = ""; t.categories = [];
+    t.search = ""; t.statuses = []; t.provinces = []; t.tier = ""; t.vitality = ""; t.niches = []; t.categories = [];
     t.offset = 0; t.order_by = "score"; t.order = "desc"; t.limit = 50;
     document.querySelectorAll("#view-sellers th .arrow").forEach(function(a){ a.remove(); });
     loadTable("sellers");
@@ -2336,9 +2377,9 @@
   $("btnQueue").addEventListener("click", function(){
     $("fSearch").value = ""; $("fProvince").value = ""; $("fTier").value = "";
     $("fStatus").value = "new"; $("fPageSize").value = "25"; $("fCategory").value = "";
-    $("fVitality").value = "";
+    $("fVitality").value = ""; $("fNiche").value = "";
     var t = T.sellers;
-    t.search = ""; t.provinces = []; t.tier = ""; t.statuses = ["new"]; t.categories = []; t.vitality = "";
+    t.search = ""; t.provinces = []; t.tier = ""; t.statuses = ["new"]; t.categories = []; t.vitality = ""; t.niches = [];
     t.order_by = "score"; t.order = "desc"; t.offset = 0; t.limit = 25;
     loadTable("sellers");
     toast("Показаны те, кому ещё не писали, по убыванию оценки", "ok");

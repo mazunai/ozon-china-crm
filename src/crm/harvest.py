@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from .category import extract_category
 from .store import (
     VERIFY_HEURISTIC,
     VERIFY_NONE,
@@ -596,6 +597,10 @@ class ChinaSellerHarvester:
         # продавцу — один сэмпл за проход (карточек у него может быть много).
         self._vitality_pending: Dict[str, Tuple[int, int]] = {}
         self._vitality_sampled: Set[str] = set()
+        # Нишевые категории: тот же паттерн — с открытой карточки, по одному
+        # замеру на продавца за проход, запись после появления в базе.
+        self._category_pending: Dict[str, Tuple[str, dict]] = {}
+        self._category_sampled: Set[str] = set()
 
     def cancelled(self) -> bool:
         """Запрошена ли отмена. Проверяется в каждом цикле обхода."""
@@ -725,6 +730,9 @@ class ChinaSellerHarvester:
             # живости продавца (+1 запрос к странице отзывов, максимум
             # пара якорных). Темп держит общая адаптивная пауза клиента.
             self._sample_vitality(seller_id, data)
+            # Категория ниши берётся из хлебных крошек этой же карточки —
+            # без единого дополнительного запроса
+            self._sample_category(seller_id, article, data)
 
             record = sellers.setdefault(seller_id, {
                 "shop_name": shop_name, "products": [], "delivery_node": None,
@@ -770,6 +778,25 @@ class ChinaSellerHarvester:
                 recorded += 1
         self.stats.vitality_samples += recorded
         self._vitality_pending = {}
+
+    def _sample_category(self, seller_id: str, article: str, card_json: dict) -> None:
+        """Снимает нишу с открытой карточки (хлебные крошки, +0 запросов)."""
+        if seller_id in self._category_sampled:
+            return
+        self._category_sampled.add(seller_id)
+        category = extract_category(card_json)
+        if category:
+            self._category_pending[seller_id] = (article, category)
+
+    def _flush_categories(self) -> None:
+        """Дописывает замеры категорий в журнал (только INSERT, без правок)."""
+        if self.store is None or not self._category_pending:
+            return
+        recorded = 0
+        for seller_id, (article, category) in self._category_pending.items():
+            if self.store.record_category(seller_id, article, category):
+                recorded += 1
+        self._category_pending = {}
 
     def _check_warehouse(self, node: Optional[dict], article: str) -> Optional[dict]:
         """Проверяет склад продавца через виджет доставки."""
@@ -953,6 +980,7 @@ class ChinaSellerHarvester:
             # записывать. Сюда же попадают сэмплы известных продавцов,
             # накопившиеся к этому моменту.
             self._flush_vitality()
+            self._flush_categories()
 
         for index, (seller_id, record) in enumerate(sellers.items(), 1):
             if self.cancelled():
@@ -985,6 +1013,7 @@ class ChinaSellerHarvester:
         # Хвост сэмпла: продавцы, пропущенные по свежим метрикам, в порции
         # не попадали, а их сэмплы уже сняты с карточек.
         self._flush_vitality()
+        self._flush_categories()
 
         if self.store is not None and not self.cancelled():
             if seen:

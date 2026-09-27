@@ -159,10 +159,12 @@ class SellersApi:
         # Живость: фильтр «только молчуны / только отвечающие»
         vitality = (query.get("vitality") or "").strip()
         vitality = vitality if vitality in ("replies", "silent") else None
+        # Ниша: фильтр по актуальной категории товара (multi, как провинции)
+        niches = multi("niche")
 
         store = self.store()
         kwargs = dict(statuses=statuses, provinces=provinces, search=search, tiers=tiers,
-                      reply_categories=categories, vitality=vitality)
+                      reply_categories=categories, vitality=vitality, niches=niches)
         rows = store.list_sellers(
             verified_only=verified_only,
             order_by=order_by,
@@ -194,6 +196,7 @@ class SellersApi:
             "verify_labels": VERIFY_LABELS,
             "reply_labels": REPLY_CATEGORY_LABELS,
             "provinces": store.province_facets(),
+            "niche_facets": store.niche_facets(),
         }
 
     def export_csv(self, query: dict) -> str:
@@ -213,6 +216,7 @@ class SellersApi:
             tiers=multi("tier"),
             reply_categories=multi("category"),
             vitality=(query.get("vitality") or "").strip() or None,
+            niches=multi("niche"),
             search=query.get("search", ""),
             order_by=query.get("order_by", "score"),
             descending=query.get("order", "desc").lower() != "asc",
@@ -238,7 +242,7 @@ class SellersApi:
 
         buffer = io.StringIO()
         writer = csv.writer(buffer, delimiter=";")
-        writer.writerow([title for _, title in columns] + ["Живость"])
+        writer.writerow([title for _, title in columns] + ["Ниша", "Живость"])
         for row in rows:
             v = vitality_payload(int(row["reviews_seen"] or 0), int(row["replies_seen"] or 0))
             if v["seen"] <= 0:
@@ -247,7 +251,8 @@ class SellersApi:
                 vitality_text = "мало данных"
             else:
                 vitality_text = f'{v["label"]} {v["replies"]}/{v["seen"]}'
-            writer.writerow([row[key] for key, _ in columns] + [vitality_text])
+            writer.writerow([row[key] for key, _ in columns]
+                            + [row["niche"] or "", vitality_text])
         return "\ufeff" + buffer.getvalue()
 
     def detail(self, seller_id: str) -> dict:
@@ -1902,6 +1907,8 @@ class Handler(BaseHTTPRequestHandler):
                 "reminders": store.reminders(days=3, limit=12),
                 # Живость продавцов: кто отвечает на отзывы, кто молчит
                 "vitality_counts": store.vitality_counts(),
+                # Нишевые категории: где больше продавцов и кто отвечает
+                "niche_stats": store.category_stats(limit=10),
             })
         if path == "/api/seller/detail":
             seller_id = self._query().get("seller_id", "")

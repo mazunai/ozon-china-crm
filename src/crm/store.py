@@ -209,6 +209,24 @@ CREATE INDEX IF NOT EXISTS idx_seller_products_seen ON seller_products(last_seen
 CREATE INDEX IF NOT EXISTS idx_seller_products_seller ON seller_products(seller_id);
 """
 
+# Нишевые категории — ЖУРНАЛ измерений, не справочник: каждая снятая категория
+# дописывается новой строкой, существующие данные никогда не переписываются
+# (правило «не потерять правду»). Актуальная категория продавца — строка с
+# максимальным id. Таблица аддитивная: ничего из существующего не меняет.
+CATEGORIES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS seller_categories (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    seller_id      TEXT NOT NULL,
+    article        TEXT NOT NULL DEFAULT '',
+    category_path  TEXT NOT NULL DEFAULT '',
+    category_leaf  TEXT NOT NULL DEFAULT '',
+    category_id    TEXT NOT NULL DEFAULT '',
+    collected_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_seller_categories_seller ON seller_categories(seller_id, id);
+CREATE INDEX IF NOT EXISTS idx_seller_categories_leaf ON seller_categories(category_leaf);
+"""
+
 # Индексы создаются ПОСЛЕ миграции: на старой базе очереди колонки verified_by
 # ещё нет, и CREATE INDEX по ней упал бы.
 SCHEMA_INDEXES = """
@@ -299,6 +317,7 @@ class SellerStore:
             conn.executescript(MESSAGES_SCHEMA)
             self._migrate_messages(conn)
             conn.executescript(PRODUCTS_SCHEMA)
+            conn.executescript(CATEGORIES_SCHEMA)
 
     @staticmethod
     def _migrate_messages(conn: sqlite3.Connection) -> None:
@@ -409,6 +428,7 @@ class SellerStore:
         tiers: Optional[Sequence[str]] = None,
         reply_categories: Optional[Sequence[str]] = None,
         vitality: Optional[str] = None,
+        niches: Optional[Sequence[str]] = None,
     ) -> Tuple[str, List]:
         """Собирает WHERE и параметры для выборки продавцов.
 
@@ -445,6 +465,17 @@ class SellerStore:
         elif vitality == "silent":
             where.append(f"({SQL_VITALITY_SILENT})")
 
+        # Ниша: только по АКТУАЛЬНОМУ замеру категории продавца
+        if niches:
+            where.append(
+                "EXISTS (SELECT 1 FROM seller_categories sc "
+                "WHERE sc.seller_id = sellers.seller_id "
+                "AND sc.id = (SELECT MAX(id) FROM seller_categories "
+                "WHERE seller_id = sc.seller_id) "
+                f"AND sc.category_leaf IN ({','.join('?' * len(niches))}))"
+            )
+            params.extend(niches)
+
         if search:
             where.append(
                 "(shop_name LIKE ? OR company_name LIKE ? OR uscc LIKE ? "
@@ -469,6 +500,7 @@ class SellerStore:
         tiers: Optional[Sequence[str]] = None,
         reply_categories: Optional[Sequence[str]] = None,
         vitality: Optional[str] = None,
+        niches: Optional[Sequence[str]] = None,
     ) -> List[sqlite3.Row]:
         """Список продавцов для дашборда.
 
@@ -493,6 +525,7 @@ class SellerStore:
             tiers=tiers,
             reply_categories=reply_categories,
             vitality=vitality,
+            niches=niches,
         )
         if order_by == "last_reply_at":
             order_sql = "last_reply_at"
@@ -503,11 +536,15 @@ class SellerStore:
         # База в подзапросе: WHERE остаётся однозначным (без префиксов), а JOIN
         # с сообщениями добавляет last_reply_at поверх отфильтрованных строк.
         sql = (
-            f"SELECT t.*, r.last_reply_at FROM "
+            f"SELECT t.*, r.last_reply_at, c.category_leaf AS niche FROM "
             f"(SELECT {SELECT_FIELDS} FROM sellers{where}) t "
             f"LEFT JOIN (SELECT seller_id, MAX(sent_at) AS last_reply_at "
             f"FROM messages WHERE result = 'received' GROUP BY seller_id) r "
             f"ON r.seller_id = t.seller_id "
+            f"LEFT JOIN (SELECT seller_id, category_leaf FROM seller_categories sc "
+            f"WHERE sc.id = (SELECT MAX(id) FROM seller_categories "
+            f"WHERE seller_id = sc.seller_id)) c "
+            f"ON c.seller_id = t.seller_id "
             f"ORDER BY {order_sql} {'DESC' if descending else 'ASC'} "
             f"LIMIT ? OFFSET ?"
         )
@@ -525,6 +562,7 @@ class SellerStore:
         tiers: Optional[Sequence[str]] = None,
         reply_categories: Optional[Sequence[str]] = None,
         vitality: Optional[str] = None,
+        niches: Optional[Sequence[str]] = None,
     ) -> int:
         """Число записей под теми же условиями, что и list_sellers."""
         where, params = self._build_filter(
@@ -535,6 +573,7 @@ class SellerStore:
             tiers=tiers,
             reply_categories=reply_categories,
             vitality=vitality,
+            niches=niches,
         )
         with self._connect() as conn:
             return int(conn.execute(f"SELECT COUNT(*) AS n FROM sellers{where}", params).fetchone()["n"])
@@ -748,6 +787,83 @@ class SellerStore:
         counts["unknown"] = max(0, verified - sampled)
         counts["verified"] = verified
         return counts
+
+    # --- Нишевые категории: журнал измерений, без переписывания -------------
+
+    def record_category(self, seller_id: str, article: str, category: dict) -> bool:
+        """Дописывает замер категории продавца в журнал (только INSERT).
+
+        Ни одна существующая строка не меняется: замер — новое измерение,
+        а не правка. Актуальной считается запись с максимальным id.
+        """
+        if not category or not category.get("leaf"):
+            return False
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO seller_categories "
+                "(seller_id, article, category_path, category_leaf, category_id, collected_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (seller_id, article or "", category.get("path") or "",
+                 category["leaf"], str(category.get("category_id") or ""), _now()),
+            )
+        return True
+
+    def seller_categories_map(self) -> Dict[str, dict]:
+        """Актуальная категория каждого продавца (строка с максимальным id)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT sc.seller_id, sc.category_path, sc.category_leaf "
+                "FROM seller_categories sc "
+                "WHERE sc.id = (SELECT MAX(id) FROM seller_categories "
+                "WHERE seller_id = sc.seller_id)"
+            ).fetchall()
+        return {r["seller_id"]: dict(r) for r in rows}
+
+    def categorized_seller_ids(self) -> set:
+        """Продавцы, у которых уже есть хотя бы один замер категории."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT seller_id FROM seller_categories").fetchall()
+        return {r["seller_id"] for r in rows}
+
+    def niche_facets(self) -> List[tuple]:
+        """Ниши с числом подтверждённых продавцов — для выпадающего фильтра."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT sc.category_leaf AS leaf, COUNT(*) AS n "
+                "FROM seller_categories sc "
+                "JOIN sellers s ON s.seller_id = sc.seller_id "
+                "WHERE s.verified_by IN (?, ?) "
+                "AND sc.id = (SELECT MAX(id) FROM seller_categories "
+                "WHERE seller_id = sc.seller_id) "
+                "GROUP BY sc.category_leaf ORDER BY n DESC, leaf",
+                (VERIFY_USCC, VERIFY_WAREHOUSE),
+            ).fetchall()
+        return [(r["leaf"], int(r["n"])) for r in rows]
+
+    def category_stats(self, limit: int = 12) -> List[dict]:
+        """Ниши × активность: сколько продавцов и сколько из них ответили.
+
+        Это ответ на вопрос владельца «какая категория продавцов активнее
+        подключается»: доля ответивших по факту журнала сообщений.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT sc.category_leaf AS leaf, "
+                "COUNT(DISTINCT sc.seller_id) AS sellers, "
+                "SUM(CASE WHEN EXISTS (SELECT 1 FROM messages m "
+                "WHERE m.seller_id = sc.seller_id AND m.result = 'received') "
+                "THEN 1 ELSE 0 END) AS replied "
+                "FROM seller_categories sc "
+                "JOIN sellers s ON s.seller_id = sc.seller_id "
+                "WHERE s.verified_by IN (?, ?) "
+                "AND sc.id = (SELECT MAX(id) FROM seller_categories "
+                "WHERE seller_id = sc.seller_id) "
+                "GROUP BY sc.category_leaf ORDER BY sellers DESC LIMIT ?",
+                (VERIFY_USCC, VERIFY_WAREHOUSE, max(1, limit)),
+            ).fetchall()
+        return [{"leaf": r["leaf"], "sellers": int(r["sellers"]),
+                 "replied": int(r["replied"] or 0)} for r in rows]
 
     # --- Правки из дашборда ----------------------------------------------
 

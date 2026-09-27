@@ -198,8 +198,11 @@
   .kpi .k-num{font-size:23px;font-weight:800;line-height:1.1}
   .kpi .k-sub{color:var(--dim);font-size:11px;margin-top:3px}
   .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
-  .chart-wrap{position:relative;height:200px}
-  .fb-bar{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:12px;
+  .grid-2>.card{min-width:0;overflow:hidden}
+  .chart-wrap{position:relative;height:200px;overflow:hidden}
+  .chart-wrap canvas{max-width:100%!important;max-height:100%!important}
+  .fb-bar{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:12px;min-width:0}
+  .fb-bar>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     border-radius:8px;padding:3px 6px;margin-left:-6px;margin-right:-6px;
     transition:background .15s, box-shadow .15s}
   /* При наведении полоска вспыхивает своим цветом — видно, к какому статусу относится */

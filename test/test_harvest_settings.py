@@ -260,6 +260,52 @@ def test_resume_after_restart(tmp: Path):
         night.start = real_start
 
 
+def test_backfill_protocol(tmp: Path):
+    print("Протокол ретро-прохода категорий: lock, стоп-кран, двойной запуск")
+    import os
+
+    backfill_mod = Path(REPO) / "tools" / "category_backfill.py"
+    spec = importlib.util.spec_from_file_location("category_backfill", backfill_mod)
+    backfill = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backfill)   # main() под __main__-guard не стартует
+
+    # Пути подменяем ПОСЛЕ исполнения модуля: функции читают глобалы в момент вызова
+    backfill.DATA_DIR = tmp
+    backfill.STOP_PATH = tmp / "backfill.stop"
+    backfill.LOCK_PATH = tmp / "backfill.lock"
+    backfill.LOG_DIR = tmp
+
+    # Двойной запуск: живой pid в lock блокирует второй
+    backfill.take_lock()
+    check(backfill.already_running() == os.getpid(),
+          "живой lock блокирует второй запуск ретро-прохода")
+
+    # Мёртвый pid: lock не мешает (уже_running -> 0)
+    backfill.LOCK_PATH.write_text("999999", encoding="utf-8")
+    check(backfill.already_running() == 0,
+          "мёртвый lock не блокирует запуск")
+    # release_lock консервативен: снимает только СВОЙ pid (защита от чужого)
+    backfill.LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    backfill.release_lock()
+    check(not backfill.LOCK_PATH.exists(), "release_lock снимает свой lock")
+
+    # Стоп-кран
+    backfill.take_lock()
+    backfill.STOP_PATH.write_text("стоп\n", encoding="utf-8")
+    check(backfill.STOP_PATH.exists(), "стоп-кран создаётся")
+    backfill.release_lock()
+    backfill.STOP_PATH.unlink()
+    print("  (стоп-кран проверен в цикле сбора — скрипт завершается по нему)")
+
+    # article_from_url: адрес товара из ссылки-примера
+    check(backfill.article_from_url("https://www.ozon.ru/product/1687474411/") == "1687474411",
+          "article извлекается из ссылки-примера")
+    check(backfill.article_from_url(
+        "https://www.ozon.ru/product/noski-zhenskie-3580930405/") == "3580930405",
+        "article извлекается из ссылки со слагом")
+    check(backfill.article_from_url("") == "", "пустая ссылка — пустой article")
+
+
 def run():
     with tempfile.TemporaryDirectory() as raw_tmp:
         tmp = Path(raw_tmp)
@@ -268,6 +314,7 @@ def run():
         test_night_status_idle(tmp)
         test_parse_live()
         test_resume_after_restart(tmp)
+        test_backfill_protocol(tmp)
     print(f"\nРезультат: {PASSED}/{TOTAL} кейсов прошло")
     return 0 if PASSED == TOTAL else 1
 

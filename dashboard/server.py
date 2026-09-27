@@ -969,6 +969,11 @@ class InboxAuto:
         if not self._busy.acquire(blocking=False):
             return
         try:
+            # Ночной сбор — отдельный процесс: BROWSER_LOCK его не останавливает,
+            # а второй Chrome на том же профиле ломает обе задачи (аудит)
+            if NIGHT.running():
+                self.state["last_result"] = "пропущено — идёт ночной сбор"
+                return
             if not BROWSER_LOCK.acquire(blocking=False):
                 self.state["last_result"] = "пропущено — браузер занят"
                 return
@@ -1167,6 +1172,17 @@ class SendRunner:
         with self._lock:
             if self.state["running"]:
                 raise ValueError("Отправка уже идёт")
+
+            # Симметрично ночному сбору: он не видит рассылку в dashboard_busy,
+            # поэтому рассылка не должна стартовать поверх него (браузер общий)
+            if NIGHT.running():
+                raise ValueError("Идёт ночной сбор — он держит браузер. Остановите его или дождитесь финиша")
+            if WORKERS.running("ozon"):
+                raise ValueError("Работает воркер Ozon — дождитесь его завершения")
+            if HARVEST.status().get("running"):
+                raise ValueError("Идёт обычный сбор — дождитесь его окончания")
+            if SERVICE.state.get("running"):
+                raise ValueError("Идёт legacy-парсинг — дождитесь его окончания")
 
             config = self.config()
             if dry_run is not None:
@@ -1515,27 +1531,42 @@ class Service:
                 raise ValueError("Парсинг уже запущен")
             if not url or "ozon.ru" not in url:
                 raise ValueError("Укажите ссылку на категорию или поиск Ozon")
+            # Симметрично остальным задачам: legacy-парсер тоже держит общий
+            # браузер и не должен стартовать поверх ночных/воркерских проходов
+            if NIGHT.running():
+                raise ValueError("Идёт ночной сбор — он держит браузер")
+            if WORKERS.running("ozon"):
+                raise ValueError("Работает воркер Ozon — дождитесь его завершения")
+            if HARVEST.status().get("running"):
+                raise ValueError("Идёт обычный сбор — дождитесь его окончания")
 
             # Тот же замок, что у сбора: браузер один на всех
             if not BROWSER_LOCK.acquire(blocking=False):
                 raise ValueError("Браузер занят другой задачей — дождитесь её завершения")
             self._holds_browser = True
+            # Замок берём до опасного участка, но get_manager/start_parsing
+            # могут бросить исключение — без finally замок оставался бы
+            # удержанным навсегда, и все браузерные задачи отказывали до
+            # перезапуска дашборда (находка аудита, воспроизведённая вживую)
+            try:
+                manager = self.get_manager()
+                manager.settings.MAX_PRODUCTS = max(1, int(max_products))
+                manager.settings.CHINA_ONLY = bool(china_only)
 
-            manager = self.get_manager()
-            manager.settings.MAX_PRODUCTS = max(1, int(max_products))
-            manager.settings.CHINA_ONLY = bool(china_only)
+                final_url = self.ensure_global(url)
+                # ВАЖНО: кэш прошлого прогона НЕ обнуляем. Раньше здесь стояло
+                # `self._results_cache = {"products": [], "stats": {}}`, и при запуске
+                # нового парса таблица пропадала у пользователя. Теперь предыдущие
+                # результаты остаются на экране, пока идёт новый обход, а по его
+                # завершении заменяются свежими.
+                PROGRESS.reset()
+                PROGRESS.phase = "Запуск Chrome"
+                PROGRESS.value = 3
 
-            final_url = self.ensure_global(url)
-            # ВАЖНО: кэш прошлого прогона НЕ обнуляем. Раньше здесь стояло
-            # `self._results_cache = {"products": [], "stats": {}}`, и при запуске
-            # нового парса таблица пропадала у пользователя. Теперь предыдущие
-            # результаты остаются на экране, пока идёт новый обход, а по его
-            # завершении заменяются свежими.
-            PROGRESS.reset()
-            PROGRESS.phase = "Запуск Chrome"
-            PROGRESS.value = 3
-
-            ok = manager.start_parsing(final_url, EXPORT_FIELDS)
+                ok = manager.start_parsing(final_url, EXPORT_FIELDS)
+            except BaseException:
+                self._release_browser()
+                raise
             if not ok:
                 self._release_browser()
                 raise ValueError("Парсер уже занят другим заданием")
@@ -1924,6 +1955,10 @@ class Handler(BaseHTTPRequestHandler):
                                    200 if detail else 404)
         if path == "/api/sellers/export.csv":
             marketplace = str(self._query().get("marketplace", "ozon"))
+            # Инъекция заголовков: имя файла собирается из query-параметра,
+            # поэтому пропускаем только безопасные символы (находка аудита)
+            if not re.fullmatch(r"[a-z0-9_-]{1,20}", marketplace):
+                return self._send_json({"error": "marketplace: ozon|wb"}, 400)
             body = self._crm(self._query()).export_csv(self._query()).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
@@ -2073,7 +2108,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
-                return self._send_json({"ok": True})
+                # Ответ УЖЕ отправлен (303 + cookie). Раньше здесь был ещё
+                # return self._send_json({"ok": True}) — второй ответ в то же
+                # соединение: BrokenPipe на сервере и рассинхрон keep-alive
+                # у клиента (находка аудита, подтверждена живым дампом).
+                return
             fails = LOGIN_FAILS_BY_IP[client_ip] = LOGIN_FAILS_BY_IP.get(client_ip, 0) + 1
             LOGIN_FAILS.append((now, client_ip))
             if fails >= LOGIN_MAX_FAILS:
@@ -2167,19 +2206,30 @@ class Handler(BaseHTTPRequestHandler):
             if not BROWSER_LOCK.acquire(blocking=False):
                 return self._send_json(
                     {"error": "Браузер занят другой задачей — дождитесь её завершения"}, 400)
+            if NIGHT.running():
+                BROWSER_LOCK.release()
+                return self._send_json(
+                    {"error": "Идёт ночной сбор — он держит браузер. Остановите его или дождитесь финиша"}, 409)
             try:
                 from src.crm.reply import reply_to_seller
 
                 result = reply_to_seller(SEND.DATA_DIR, CRUD.store(), seller_id, text)
                 HUB.log(f"Ответ из дашборда: {seller_id} — текст ушёл в чат Ozon")
-                from src.notify import telegram as tg
-
-                shop = (CRUD.detail(seller_id) or {}).get("shop_name") or seller_id
-                tg.send(f"💬 Ответ ушёл продавцу {shop}:\n{text[:400]}")
             except Exception as exc:                      # noqa: BLE001
                 return self._send_json({"error": str(exc)[:300]}, 500)
             finally:
                 BROWSER_LOCK.release()
+            # Telegram — ПОСЛЕ ответа клиенту и вне защищаемого блока: падение
+            # уведомления не должно возвращать 500 — сообщение-то УШЛО, и
+            # человек отправил бы повтор (дубликат продавцу). Находка аудита.
+            try:
+                from src.notify import telegram as tg
+
+                shop = (CRUD.detail(seller_id) or {}).get("shop_name") or seller_id
+                tg.send(f"💬 Ответ ушёл продавцу {shop}:\n{text[:400]}")
+            except Exception:                             # noqa: BLE001
+                logging.getLogger(__name__).warning(
+                    "Telegram-уведомление об ответе не отправилось", exc_info=True)
             return self._send_json(result)
 
         if path == "/api/sellers/delete":
@@ -2239,6 +2289,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send_json({"error": "Идёт ночной сбор — воркер подождёт"}, 400)
                 if SEND.status().get("running"):
                     return self._send_json({"error": "Идёт рассылка — воркер подождёт"}, 400)
+                if SERVICE.state.get("running"):
+                    return self._send_json({"error": "Идёт legacy-парсинг — воркер подождёт"}, 400)
             try:
                 WORKERS.start(marketplace, {
                     "url": str(data.get("url", "")).strip(),
@@ -2366,6 +2418,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/inbox/check":
             # Проверка входящих открывает вкладку в общем Chrome: как и сбор
             # с отправкой, держит замок, чтобы задачи не мешали друг другу.
+            if NIGHT.running():
+                return self._send_json(
+                    {"error": "Идёт ночной сбор — он держит браузер. Проверка подождёт"}, 409)
             if not BROWSER_LOCK.acquire(blocking=False):
                 return self._send_json(
                     {"error": "Браузер занят другой задачей — дождитесь её завершения"}, 400)

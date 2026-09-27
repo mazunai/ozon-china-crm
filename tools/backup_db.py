@@ -66,6 +66,17 @@ def snapshot(db_path: Path = DB_PATH) -> Path:
             "Она появится после первого запуска: python run_harvest.py harvest"
         )
 
+    # Диск, забитый под завязку, даёт частичный снимок — а мы его потом
+    # «восстановим». Лучше отказаться заранее (аудит)
+    import shutil as _shutil
+
+    free = _shutil.disk_usage(BACKUP_DIR).free
+    need = db_path.stat().st_size * 2
+    if free < max(need, 50 * 1024 * 1024):
+        raise RuntimeError(
+            f"На диске свободно {free // (1024 * 1024)} МБ — меньше двойного "
+            f"размера базы. Освободите место, иначе снимок уйдёт битым")
+
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     target = BACKUP_DIR / f"sellers-{stamp}.sqlite3"
@@ -152,6 +163,41 @@ def export_csv(db_path: Path = DB_PATH, verified_only: bool = True) -> Path:
     return target
 
 
+def export_messages(db_path: Path = DB_PATH) -> Path:
+    """Выгружает журнал переписки в CSV — второй офсайт-файл рядом с sellers.csv.
+
+    Аудит: messages в офсайт не попадали никогда, при этом полный текст
+    ответов — ключевое требование проекта «ни один ответ не теряется».
+    """
+    if not db_path.exists():
+        raise FileNotFoundError(f"База не найдена: {db_path}")
+
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    target = EXPORT_DIR / "messages.csv"
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT m.id, m.seller_id, s.shop_name, m.text, m.sent_at, "
+            "m.result, m.category, m.error "
+            "FROM messages m LEFT JOIN sellers s ON s.seller_id = m.seller_id "
+            "ORDER BY m.id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    columns = ["id", "seller_id", "shop_name", "text", "sent_at", "result", "category", "error"]
+    with target.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle, delimiter=";")
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow([row[column] for column in columns])
+
+    logger.info(f"Выгрузка журнала переписки: {target} ({len(rows)} строк)")
+    return target
+
+
 def push_to_git(message: str = "") -> bool:
     """Коммитит выгрузку в приватный репозиторий — это и есть офсайт-копия.
 
@@ -160,7 +206,8 @@ def push_to_git(message: str = "") -> bool:
     """
     repo = Settings.BASE_DIR
     try:
-        subprocess.run(["git", "-C", str(repo), "add", "backups/sellers.csv"],
+        subprocess.run(["git", "-C", str(repo), "add", "backups/sellers.csv",
+                        "backups/messages.csv"],
                        check=True, capture_output=True)
         result = subprocess.run(
             ["git", "-C", str(repo), "commit", "-q", "-m",
@@ -190,8 +237,27 @@ def restore(backup_path: Path, db_path: Path = DB_PATH) -> Path:
         raise FileNotFoundError(f"Снимок не найден: {backup_path}")
 
     if db_path.exists():
+        # Живой дашборд держит соединения и продолжит писать в старый файл:
+        # восстановление поверх него бессмысленно и опасно (аудит)
+        pid_file = db_path.parent / "local_server.pid"
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text(encoding="utf-8").strip() or 0), 0)
+                raise RuntimeError(
+                    "Локальный дашборд запущен (data/local_server.pid) — "
+                    "остановите его: tools/local_server.sh stop")
+            except (ProcessLookupError, ValueError):
+                pass
+        # Safety-копия — согласованный снимок через backup(), а не копия
+        # файла: в WAL-режиме копия основного файла пуста или битая
         safety = db_path.with_suffix(".sqlite3.before-restore")
-        shutil.copy2(db_path, safety)
+        source = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        target = sqlite3.connect(safety)
+        try:
+            source.backup(target)
+        finally:
+            source.close()
+            target.close()
         logger.info(f"Текущая база сохранена как {safety.name}")
         # Убираем WAL-хвосты, иначе они «перекроют» восстановленный файл
         for suffix in ("-wal", "-shm"):
@@ -251,6 +317,8 @@ def main() -> int:
         if args.push:
             export = export_csv(verified_only=not args.all)
             print(f"Выгрузка: {export}")
+            messages = export_messages()
+            print(f"Выгрузка журнала переписки: {messages}")
             push_to_git()
     except FileNotFoundError as exc:
         print(exc)

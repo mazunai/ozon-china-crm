@@ -20,7 +20,9 @@ set -euo pipefail
 VM="${OZON_VM:-yc-user@51.250.84.76}"
 KEY="${OZON_VM_KEY:-$HOME/.ssh/ozon_crm_cloud}"
 REMOTE_DIR="/home/yc-user/parser"
-SSH_OPTS=(-i "$KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15)
+# Ключ хоста зафиксирован в deploy/vm_known_hosts (аудит: без проверки
+# ключа MITM на этом канале получает .env). Обновить: ssh-keyscan -H <host>
+SSH_OPTS=(-i "$KEY" -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$(dirname "$0")/vm_known_hosts" -o ConnectTimeout=15)
 RESTART=1
 WITH_ENV=0
 for arg in "$@"; do
@@ -48,6 +50,7 @@ rsync -az --delete \
   --exclude 'output/' \
   --exclude 'logs/' \
   --exclude 'outreach_data/' \
+  --exclude 'backups/' \
   --exclude '*.tar.gz' \
   ./ "$VM:$REMOTE_DIR/"
 echo "  код отправлен"
@@ -75,9 +78,11 @@ ssh "${SSH_OPTS[@]}" "$VM" "
   cd $REMOTE_DIR
   # curl_cffi обязателен: без него WB-воркер не стартует (WB закрывает
   # обычный requests по TLS-отпечатку). Если чего-то нет — ставим всё.
-  .venv/bin/python -c 'import selenium, openpyxl, curl_cffi' 2>/dev/null \
-    && echo '  selenium + openpyxl + curl_cffi: есть' \
-    || { echo '  ставлю недостающее…'; .venv/bin/pip install -q -r requirements.txt; }
+  # Аудит: проверка 3 из 9 пакетов пропускала отсутствие остальных —
+  # служба перезапускалась в падение. pip install идемпотентен и быстр.
+  .venv/bin/pip install -q -r requirements.txt \
+    && echo '  зависимости requirements.txt: установлены' \
+    || echo '  ВНИМАНИЕ: pip install завершился с ошибкой — проверьте службу'
 "
 
 # --- 4. Перезапуск -------------------------------------------------------- #
@@ -95,8 +100,9 @@ fi
 
 echo
 echo "Проверка дашборда:"
-curl -s -o /dev/null -w "  http://$VM:8000/  ->  %{http_code}\n" \
-  --max-time 10 "http://${VM#*@}:8000/" || echo "  не отвечает"
-echo "  (401 — это норма: дашборд закрыт паролем из .env)"
+# Порт 8000 закрыт извне (v1.8.3) — проверяем публичный HTTPS:
+# 401 — норма, дашборд закрыт паролем из .env
+curl -s -o /dev/null -w "  https://ozon.sh-coding.ru/  ->  %{http_code}\n" \
+  --max-time 10 "https://ozon.sh-coding.ru/" || echo "  не отвечает"
 echo
 echo "Готово. Логи: ssh $VM 'journalctl -u parser-dashboard -f'"

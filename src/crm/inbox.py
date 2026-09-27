@@ -174,8 +174,11 @@ class InboxChecker:
         body = driver.find_element("tag name", "body").text
         return parse_chats(json.loads(body))
 
-    def _read_full_reply(self, client, seller_id: str) -> str:
-        """Полный текст ответа из открытого чата. Не вышло — пустая строка."""
+    def _read_full_reply(self, client, seller_id: str) -> List[str]:
+        """Полные тексты ответов из открытого чата — по одному на пузырь.
+
+        Пустой список — не вышло (тогда останется превью из списка чатов).
+        """
         own = [m["text"] for m in self.store.message_history(seller_id, limit=100)
                if m["result"] == "sent"]
         try:
@@ -184,9 +187,8 @@ class InboxChecker:
             bubbles = client.read_incoming_texts()
         except Exception as exc:                             # noqa: BLE001
             logger.warning(f"Полный текст чата {seller_id} не получен: {exc}")
-            return ""
-        kept = filter_incoming_bubbles(bubbles, own)
-        return "\n".join(kept).strip()
+            return []
+        return filter_incoming_bubbles(bubbles, own)
 
     def _make_chat_client(self, driver, manager):
         from ..outreach.sender import ChatClient, ChatSelectors
@@ -224,29 +226,49 @@ class InboxChecker:
                 unmatched.append(chat["title"])
                 logger.warning(f"Чат с непрочитанными не найден в базе: {chat['title']!r}")
                 continue
-            if row["status"] == STATUS_REPLIED:
-                unchanged.append(chat["title"])
-                continue
+            # Продавцы со статусом «ответил» больше НЕ пропускаются: их новые
+            # входящие тоже обязаны попасть в журнал (аудит: пропуск молча
+            # терял повторные ответы — прямое нарушение «ни один ответ
+            # не теряется»).
 
             received_at = parse_composer_date(chat["date"])
-            text = chat["text"]
+            preview = (chat["text"] or "").strip()
+            full_bubbles: List[str] = []
             if client is not None:
-                full = self._read_full_reply(client, row["seller_id"])
-                if full:
-                    text = full
-            if not text:
+                full_bubbles = self._read_full_reply(client, row["seller_id"])
+
+            # Порядок сохранения важен: открытие чата помечает его прочитанным
+            # в Ozon, поэтому ПРЕВЬЮ сохраняем ДО открытия, а полный текст
+            # дотягиваем update_reply_text (он перезаписывает превью, только
+            # если длиннее). Иначе падение после открытия чата теряло ответ
+            # навсегда (аудит).
+            if not preview and not full_bubbles:
                 logger.warning(f"У чата {chat['title']!r} нет текста — пропущен")
                 continue
 
-            category = self.store.save_reply(row["seller_id"], text, received_at)
+            category = ""
+            if preview:
+                category = self.store.save_reply(row["seller_id"], preview, received_at)
+            for i, bubble in enumerate(full_bubbles):
+                if i == 0 and preview:
+                    # первый пузырь — тот же ответ целиком: обновляем превью
+                    self.store.update_reply_text(row["seller_id"], bubble, received_at)
+                else:
+                    category = self.store.save_reply(row["seller_id"], bubble, received_at)
+            if full_bubbles:
+                last = self.store.message_history(row["seller_id"], limit=1)
+                if last and last[0]["result"] == "received":
+                    category = last[0]["category"] or category
+
+            text_for_log = full_bubbles[0] if full_bubbles else preview
             marked.append({
                 "seller_id": row["seller_id"],
                 "shop": chat["title"],
-                "text": text,
+                "text": text_for_log,
                 "category": category,
-                "category_label": REPLY_CATEGORY_LABELS[category],
+                "category_label": REPLY_CATEGORY_LABELS.get(category, category),
             })
-            logger.info(f"Ответил: {chat['title']} — {text[:60]}")
+            logger.info(f"Ответил: {chat['title']} — {text_for_log[:60]}")
 
         return {
             "chats": len(chats),

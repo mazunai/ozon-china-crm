@@ -359,6 +359,41 @@ class TestMigration(unittest.TestCase):
         finally:
             tmp.cleanup()
 
+    def test_handover_cli_entry(self):
+        """CLI-вход handover: по id, по имени, по подстроке (аудит: вход
+        для менеджера был не тестирован)."""
+        import argparse
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "run_crm", Path(__file__).parent.parent / "run_crm.py")
+        run_crm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(run_crm)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SellerStore(Path(tmp) / "t.sqlite3")
+            store.add_sellers([_seller("555", "Ozon Мебель")])
+            # CLI читает DB_PATH из глобала модуля — подменяем на временную базу
+            run_crm.DB_PATH = Path(tmp) / "t.sqlite3"
+
+            # по id
+            args = argparse.Namespace(seller="555", note="")
+            code = run_crm.cmd_handover(args)
+            self.assertEqual(code, 0)
+            row = store.get_seller("555")
+            self.assertNotEqual(row["handed_to_manager_at"], "")
+            self.assertEqual(row["stage"], "negotiation")
+
+            # по подстроке имени
+            args = argparse.Namespace(seller="мебель", note="")
+            code = run_crm.cmd_handover(args)
+            self.assertEqual(code, 0)
+
+            # несуществующий — код 1 и без изменений
+            args = argparse.Namespace(seller="никого-такого", note="")
+            code = run_crm.cmd_handover(args)
+            self.assertEqual(code, 1)
+
     def test_interested_categories_constant(self):
         self.assertIn("interested", INTERESTED_CATEGORIES)
         self.assertIn("positive", INTERESTED_CATEGORIES)

@@ -211,6 +211,38 @@ class TestProductCache(unittest.TestCase):
             },
         }
 
+    def _grid_with_recommendations(self, real_ids, rec_ids) -> dict:
+        """Страница раздела с ДВУМЯ гридами: настоящий (params="{}") и
+        рекомендательный («Возможно, вам понравится» — title в params).
+        Главная ловушка проекта: у рекомендаций российские товары."""
+        return {
+            "layout": [
+                {"stateId": "tileGridDesktop-1", "component": "tileGrid-1", "params": "{}"},
+                {"stateId": "tileGridDesktop-2", "component": "tileGrid-2",
+                 "params": json.dumps({"title": "Возможно, вам понравится"})},
+            ],
+            "widgetStates": {
+                "tileGridDesktop-1": json.dumps({"items": [{"id": i} for i in real_ids]}),
+                "tileGridDesktop-2": json.dumps({"items": [{"id": i} for i in rec_ids]}),
+            },
+        }
+
+    def test_collect_products_rejects_recommendation_grid(self):
+        """Товары из рекомендательного грида не попадают в выборку.
+
+        AGENTS.md §3.3.1: грид с title в params — рекомендации с российскими
+        товарами. Ослабление этой отбраковки оставит набор зелёным при
+        потоке российских продавцов в китайскую базу.
+        """
+        client = FakeClient(pages={
+            SECTION_PATH: self._grid_with_recommendations(
+                ["101", "102"], ["900", "901", "902"]),
+            f"{SECTION_PATH}?page=2": self._grid([]),
+        })
+        harvester = ChinaSellerHarvester(client, store=self.store)
+        ids = harvester.collect_products(SECTION_PATH, 2)
+        self.assertEqual(ids, ["101", "102"])
+
     def test_collect_products_start_page_jumps(self):
         """start_page не перечитывает предыдущие страницы раздела."""
         client = FakeClient(pages={

@@ -49,7 +49,14 @@ def _fmt_date(iso: str) -> str:
 
 
 def _shop(row) -> str:
-    return row.get("shop_name") or row.get("seller_id") or "?"
+    # row бывает и dict (comm_report_rows), и sqlite3.Row (get_seller):
+    # у Row нет метода .get() — обращаемся по ключу с проверкой наличия
+    try:
+        return row.get("shop_name") or row.get("seller_id") or "?"
+    except AttributeError:
+        keys = row.keys()
+        name = row["shop_name"] if "shop_name" in keys else ""
+        return name or row["seller_id"] or "?"
 
 
 def _handover_state(row) -> str:

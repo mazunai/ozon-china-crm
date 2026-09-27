@@ -369,27 +369,49 @@ class SellerStore:
 
                 verified = getattr(s, "verified_by", VERIFY_NONE) or VERIFY_NONE
                 if exists:
+                    # Защита от обнуления: транспортный сбой при чтении модалки
+                    # даёт пустые метрики, и UPDATE с пустотой «замораживал» их
+                    # на refresh_days (аудит: 21 подтверждённых с обнулённым
+                    # uscc). Пустое новое значение не затирает непустое старое.
+                    # verified_by двигается только вверх: heuristic/none не
+                    # понижают uscc/warehouse (легаси-путь audited отдельно).
                     conn.execute(
                         """UPDATE sellers SET
-                               shop_name = ?, company_name = ?, uscc = ?, province = ?,
-                               orders = ?, reviews = ?, months_on_ozon = ?, rating = ?,
-                               score = ?, is_chinese = ?,
-                               verified_by = CASE WHEN ? != 'none' THEN ? ELSE verified_by END,
+                               shop_name = ?, company_name = ?,
+                               uscc = CASE WHEN ? != '' THEN ? ELSE uscc END,
+                               province = CASE WHEN ? != '' THEN ? ELSE province END,
+                               orders = CASE WHEN ? > 0 THEN ? ELSE orders END,
+                               reviews = CASE WHEN ? > 0 THEN ? ELSE reviews END,
+                               months_on_ozon = CASE WHEN ? > 0 THEN ? ELSE months_on_ozon END,
+                               rating = CASE WHEN ? > 0 THEN ? ELSE rating END,
+                               score = CASE WHEN ? > 0 THEN ? ELSE score END,
+                               is_chinese = CASE WHEN ? != 0 THEN ? ELSE is_chinese END,
+                               verified_by = CASE
+                                   WHEN ? IN ('uscc', 'warehouse') THEN ?
+                                   WHEN verified_by IN ('uscc', 'warehouse') THEN verified_by
+                                   ELSE ? END,
                                seller_profile_url = CASE WHEN seller_profile_url = '' THEN ? ELSE seller_profile_url END,
                                sample_product_url = CASE WHEN sample_product_url = '' THEN ? ELSE sample_product_url END,
                                chinese_reasons = CASE WHEN ? != '' THEN ? ELSE chinese_reasons END,
-                               last_seen_at = ?, updated_at = ?, metrics_at = ?
+                               last_seen_at = ?, updated_at = ?,
+                               metrics_at = CASE WHEN ? != '' THEN ? ELSE metrics_at END
                            WHERE seller_id = ?""",
                         (
-                            s.shop_name, s.company_name, s.uscc, s.province,
-                            s.orders, s.reviews, s.months_on_ozon, s.rating,
-                            s.score, int(s.is_chinese),
-                            verified, verified,
+                            s.shop_name, s.company_name,
+                            s.uscc, s.uscc, s.province, s.province,
+                            s.orders, s.orders, s.reviews, s.reviews,
+                            s.months_on_ozon, s.months_on_ozon, s.rating, s.rating,
+                            s.score, s.score, int(s.is_chinese), int(s.is_chinese),
+                            verified, verified, verified,
                             getattr(s, "seller_profile_url", "") or "",
                             s.sample_product_url,
                             getattr(s, "chinese_reasons", "") or "",
                             getattr(s, "chinese_reasons", "") or "",
-                            now, now, now, s.seller_id,
+                            now, now,
+                            # metrics_at двигаем только при реальных данных:
+                            # пустой замок не должен «освежать» продавца
+                            (now if (s.orders or s.reviews or s.uscc) else ""), now,
+                            s.seller_id,
                         ),
                     )
                 else:
@@ -878,18 +900,21 @@ class SellerStore:
     def delete_sellers(self, seller_ids: Sequence[str]) -> int:
         """Удаляет записи по идентификаторам. Возвращает число удалённых.
 
-        Нужно для чистки неподтверждённых: они скрыты в интерфейсе, но лежат в
-        файле базы и попадают в выгрузку «--all».
+        Нужно для чистки неподтверждённых: они скрыты в интерфейсе, но лежат
+        в файле базы и попадают в выгрузку «--all». Журналы чистятся в той же
+        транзакции: сироты после удаления рисуют пустые строки в лентах и
+        вечно ссылаются на несуществующего продавца (аудит).
         """
         if not seller_ids:
             return 0
         with self._connect() as conn:
             placeholders = ",".join("?" * len(seller_ids))
-            cur = conn.execute(
-                f"DELETE FROM sellers WHERE seller_id IN ({placeholders})",
-                list(seller_ids),
-            )
+            cur = conn.execute(f"DELETE FROM sellers WHERE seller_id IN ({placeholders})",
+                               list(seller_ids))
             deleted = cur.rowcount
+            for table in ("messages", "seller_products", "seller_categories"):
+                conn.execute(f"DELETE FROM {table} WHERE seller_id IN ({placeholders})",
+                             list(seller_ids))
         logger.info(f"Удалено записей: {deleted}")
         return deleted
 
@@ -987,15 +1012,25 @@ class SellerStore:
         """Продавец по имени магазина (без учёта регистра).
 
         Нужно для проверки входящих: Ozon в списке чатов отдаёт имя магазина,
-        а не seller_id. Если витрин с таким именем несколько — берём первую
-        по score.
+        а не seller_id. Если витрин с таким именем несколько — НЕ угадываем:
+        ответ одной витрины, записанный другой, хуже нераспознанного чата
+        (аудит: дубли имён в живой базе реальны — 'velora' ×3). Такой чат
+        уходит в unmatched на ручной разбор.
         """
         with self._connect() as conn:
-            return conn.execute(
+            rows = conn.execute(
                 "SELECT seller_id, status, shop_name FROM sellers "
-                "WHERE lower(shop_name) = lower(?) ORDER BY score DESC LIMIT 1",
+                "WHERE lower(shop_name) = lower(?) ORDER BY score DESC",
                 (shop_name.strip(),),
-            ).fetchone()
+            ).fetchall()
+        if not rows:
+            return None
+        if len(rows) > 1:
+            logger.warning(
+                f"Магазин {shop_name!r}: {len(rows)} витрин с этим именем — "
+                "чат требует ручного разбора (не матчу по имени)")
+            return None
+        return rows[0]
 
     # --- CRM: стадии сделки -------------------------------------------------
 

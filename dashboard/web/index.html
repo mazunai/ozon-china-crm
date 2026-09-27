@@ -210,9 +210,13 @@
     cursor:default}
   .fb-bar:hover .fb-fill{box-shadow:0 0 12px color-mix(in srgb, var(--sc, #3b82f6) 60%, transparent)}
   .fb-bar:hover .fb-count{color:var(--sc, #3b82f6)}
-  .fb-track{flex:1;height:13px;background:rgba(255,255,255,.06);border-radius:7px;overflow:hidden}
-  .fb-fill{height:100%;border-radius:7px;background:linear-gradient(90deg,var(--sc,#3b82f6),color-mix(in srgb,var(--sc,#3b82f6) 40%,#22d3ee))}
-  .fb-count{width:38px;text-align:right;color:var(--text);font-weight:600;flex:0 0 auto}
+  .fb-track{flex:1;height:10px;background:rgba(255,255,255,.06);border-radius:5px;overflow:hidden;
+    min-width:60px;align-self:center}
+  .fb-fill{height:100%;border-radius:5px;min-width:4px;
+    background:linear-gradient(90deg,var(--sc,#3b82f6),color-mix(in srgb,var(--sc,#3b82f6) 40%,#22d3ee))}
+  /* Число не переносится и не сжимается: «2 349 · 93%» — одной строкой */
+  .fb-count{flex:0 0 auto;min-width:96px;text-align:right;color:var(--text);font-weight:600;
+    white-space:nowrap}
   .recent-item{display:flex;gap:10px;padding:9px 2px;border-bottom:1px solid var(--line);align-items:flex-start}
   .recent-item:last-child{border-bottom:none}
   .recent-shop{font-weight:600;font-size:13px}
@@ -417,7 +421,6 @@
       <div id="ovReplies"><div class="muted">Загрузка…</div></div>
       <div class="muted" id="ovRepliesAuto"></div>
       <div class="muted" style="margin-top:8px">Входящие из чатов Ozon — только реальные ответы. Клик по строке откроет карточку продавца, ответить можно прямо там.</div>
-      <div class="muted" id="ovRepliesAuto" style="margin-top:4px"></div>
     </div>
     <div class="card">
       <h2>Пора напомнить</h2>
@@ -1227,7 +1230,7 @@
     Object.keys(drafts).forEach(function(id){
       try {
         navigator.sendBeacon("/api/seller/note",
-          new Blob([JSON.stringify({seller_id: id, note: drafts[id]})], {type:"application/json"}));
+          new Blob([JSON.stringify({seller_id: id, note: drafts[id], marketplace: MARKETPLACE})], {type:"application/json"}));
       } catch(e){}
     });
   });
@@ -1970,10 +1973,10 @@
     box.innerHTML = rows.map(function(r){
       var pct = r.sellers ? Math.round((r.replied || 0) / r.sellers * 100) : 0;
       return '<div class="fb-bar kp-blue" title="' + esc(r.leaf) + ": " +
-        fmtNum(r.sellers) + ' продавцов"><span style="width:170px;color:var(--dim)">' +
+        fmtNum(r.sellers) + ' продавцов, ответило ' + pct + '%"><span style="width:170px;color:var(--dim)">' +
         esc(r.leaf) + '</span><span class="fb-track"><span class="fb-fill" style="width:' +
         Math.max(2, Math.round(r.sellers / max * 100)) + '%"></span></span><span class="fb-count">' +
-        fmtNum(r.sellers) + " · ответило " + pct + "%</span></div>";
+        fmtNum(r.sellers) + " · " + pct + "%</span></div>";
     }).join("");
   }
 

@@ -8,8 +8,8 @@
 в data/night_harvest_state.json — после ошибки работа продолжается с того же
 места, а не с начала.
 
-Обычно запускается таймером systemd (deploy/parser-night-harvest.timer) и
-работает до --until.
+Запускается кнопкой из дашборда (NIGHT.start передаёт --url и параметры)
+и работает до --until.
 
     # проверить: один чанк по 2 страницы
     python tools/night_harvest.py --max-chunks 1 --chunk-pages 2 --quiet-pause
@@ -167,6 +167,9 @@ def dashboard_busy(base_url: str) -> str:
         return ""
     if dashboard_json(base_url, "/api/harvest", opener).get("running"):
         return "сбор"
+    # Ретро-проход категорий гоняет тот же Chrome вне дашборда (аудит)
+    if (DATA_DIR / "category_backfill.lock").exists():
+        return "ретро-проход категорий"
     send = dashboard_json(base_url, "/api/send", opener)
     if (send.get("state") or {}).get("running"):
         return "рассылка"

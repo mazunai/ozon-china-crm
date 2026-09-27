@@ -29,13 +29,22 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # один 
 Тесты (без сети, секунды):
 
 ```bash
+PYTHONPATH=. .venv/bin/python test/test_category.py           # 14: ниши из breadCrumbs, журнал замеров
+PYTHONPATH=. .venv/bin/python test/test_vitality.py           # 23: живость, Лаплас, сэмпл отзывов
+PYTHONPATH=. .venv/bin/python test/test_harvest_settings.py   # 33: настройки сборов, фазы лога, resume
+PYTHONPATH=. .venv/bin/python test/test_dashboard_http.py     # 11: HTTP-слой дашборда на эфемерном порту
+PYTHONPATH=. .venv/bin/python test/test_verify.py             # 6: подтверждение по складу
 PYTHONPATH=. .venv/bin/python test/test_chinese_filter.py     # 33 кейса классификатора
 PYTHONPATH=. .venv/bin/python test/test_outreach.py           # 14 кейсов метрик и лимитов
-PYTHONPATH=. .venv/bin/python test/test_harvest.py            # 22 кейса: пауза, кэш, инкремент
+PYTHONPATH=. .venv/bin/python test/test_harvest.py            # 24 кейса: пауза, кэш, инкремент, грид-ловушка
 PYTHONPATH=. .venv/bin/python test/test_wb_harvest.py         # 14 кейсов WB: запрос, классификация, база
 PYTHONPATH=. .venv/bin/python test/test_workers_runtime.py    # 7 кейсов: pid/стейт/стоп-файлы воркера
-PYTHONPATH=. .venv/bin/python test/test_communication.py      # 27 кейсов: ответы, категории, списки, миграция
+PYTHONPATH=. .venv/bin/python test/test_communication.py      # 31 кейс: ответы, категории, списки, миграция, handover CLI
+PYTHONPATH=. .venv/bin/python test/test_inbox.py              # 9 кейсов разбора чатов
 ```
+
+Не тесты, а ручные смоуки (требуют сеть/браузер/GUI, запускать руками):
+test_simple.py, test_seller_parser.py, test_seller_parser_simple.py, test_gui.py.
 
 Важно: тесты надо запускать с `PYTHONPATH=.` из корня. Без этого `test_simple.py`
 и `test_seller_parser_simple.py` падают с `ModuleNotFoundError: No module named 'src'` —
@@ -466,9 +475,11 @@ Storage + функция для API), но сбору нужна машина с
 
 ## 5.1. Работа с VM в Yandex Cloud — проверена фактически
 
-Ранее здесь стояло «не проверено». Теперь проверено прогоном на живой VM
-(`ubuntu@130.193.51.137`, код в `/opt/parser_ozon`, служба
-`ozon-dashboard.service`).
+Актуальная VM: `yc-user@51.250.84.76`, код в `/home/yc-user/parser`, служба
+`parser-dashboard.service`, вход по ключу `~/.ssh/ozon_crm_cloud`
+(всё это же в tools/deploy_vm.sh). Старая запись про
+`ubuntu@130.193.51.137` / `/opt/parser_ozon` — мёртвая машина, не отвечает
+(финальная проверка деплоя ходит по https://ozon.sh-coding.ru, не по :8000).
 
 **Важный факт, опровергающий прежнюю документацию:** с датацентрового IP
 главная Ozon **отдаёт антибот-челлендж**, и Camoufox его не проходит (страница

@@ -1,0 +1,107 @@
+﻿id;seller_id;shop_name;text;sent_at;result;category;error
+1;543524;mr.paper;"
+
+Здравствуйте! Магазин mr.paper!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T16:49:33+00:00;failed;;"Message: invalid selector: An invalid or illegal selector was specified\n  (Session info: chrome=154.0.8037.57); For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#invalidselectorexception\nStacktrace:\n0   chromedriver                "
+2;203104;Beautiful Commodity Center;"
+
+Здравствуйте! Магазин Beautiful Commodity Center!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T19:25:41+00:00;sent;;
+3;1969257;YM Store;"
+
+Здравствуйте! Магазин YM Store!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T19:35:45+00:00;failed;;Message: no such window: target window already closed\nfrom unknown error: web view not found\n  (Session info: chrome=154.0.8037.57)\nStacktrace:\n0   chromedriver                        0x00000001005f7d84 chromedriver + 3456388\n1   chromedriver                        0x00000001002f0650 chromedriver + 
+4;1369107;FM;"
+
+Здравствуйте! Магазин FM!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T19:41:31+00:00;failed;;Message: no such window: target window already closed\nfrom unknown error: web view not found\n  (Session info: chrome=154.0.8037.57)\nStacktrace:\n0   chromedriver                        0x00000001005f7d84 chromedriver + 3456388\n1   chromedriver                        0x00000001002f0650 chromedriver + 
+5;1494990;St,Kunkka;"
+
+Здравствуйте! Магазин St,Kunkka!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T19:53:57+00:00;failed;;Message: no such window: target window already closed\nfrom unknown error: web view not found\n  (Session info: chrome=154.0.8037.57)\nStacktrace:\n0   chromedriver                        0x00000001005f7d84 chromedriver + 3456388\n1   chromedriver                        0x00000001002f0650 chromedriver + 
+6;164285;Sunshine wall;"
+
+Здравствуйте! Магазин Sunshine wall!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T21:02:57+00:00;failed;;Message: Не дождались элемента: xpath|//textarea\n
+7;1969257;YM Store;"
+
+Здравствуйте! Магазин YM Store!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T21:03:51+00:00;sent;;
+8;2892839;Rhapsody Home Shop;"
+
+Здравствуйте! Магазин Rhapsody Home Shop!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T21:04:56+00:00;failed;;"Message: element click intercepted: Element <textarea class=\""om_17text--SRiT5\"" style=\""height: 20px;\""></textarea> is not clickable at point (1006, 641). Other element would receive the click: <div class=\""om_30inde--mOL1A v-leave om_30inde--PZhOH\"">...</div>\n  (Session info: chrome=154.0.8037.57); For "
+9;275992;CHCHCH;"
+
+Здравствуйте! Магазин CHCHCH!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T21:06:01+00:00;failed;;"Message: element click intercepted: Element <textarea class=\""om_17text--SRiT5\"" style=\""height: 20px;\""></textarea> is not clickable at point (1006, 641). Other element would receive the click: <div class=\""om_30inde--mOL1A v-leave om_30inde--PZhOH\"">...</div>\n  (Session info: chrome=154.0.8037.57); For "
+10;2275530;KELE;"
+
+Здравствуйте! Магазин KELE!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T21:07:06+00:00;failed;;"Message: element click intercepted: Element <textarea class=\""om_17text--SRiT5\"" style=\""height: 20px;\""></textarea> is not clickable at point (1006, 641). Other element would receive the click: <div class=\""om_30inde--mOL1A v-leave om_30inde--PZhOH\"">...</div>\n  (Session info: chrome=154.0.8037.57); For "
+11;1938731;jingyi;"
+
+Здравствуйте! Магазин jingyi!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T21:08:11+00:00;failed;;"Message: element click intercepted: Element <textarea class=\""om_17text--SRiT5\"" style=\""height: 20px;\""></textarea> is not clickable at point (1006, 641). Other element would receive the click: <div class=\""om_30inde--mOL1A v-leave om_30inde--PZhOH\"">...</div>\n  (Session info: chrome=154.0.8037.57); For "
+12;210974;Магазин качественных товаров;"
+
+Здравствуйте! Магазин Магазин качественных товаров!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T23:10:26+00:00;sent;;
+13;230300;Крутая жизнь;"
+
+Здравствуйте! Магазин Крутая жизнь!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T23:12:11+00:00;failed;;Message: Не дождались элемента: xpath|//textarea\n
+14;314831;KJ LED Store;"
+
+Здравствуйте! Магазин KJ LED Store!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T23:13:56+00:00;failed;;Message: Не дождались элемента: xpath|//textarea\n
+15;1795550;zhiyu;"
+
+Здравствуйте! Магазин zhiyu!
+
+
+Если не актуально — напишите, больше не буду писать.
+";2026-09-25T23:15:03+00:00;sent;;
+16;1969257;YM Store;Дорогой друг, чем я могу тебе помочь?;2026-09-26T06:30:29+00:00;received;other;

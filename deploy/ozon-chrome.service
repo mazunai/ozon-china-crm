@@ -7,7 +7,7 @@ Requires=xvfb.service
 User=yc-user
 Group=yc-user
 Environment=DISPLAY=:99
-ExecStart=/usr/bin/google-chrome --remote-debugging-port=9222 --user-data-dir=/home/yc-user/.ozon_parser_chrome --no-first-run --no-default-browser-check --window-size=1920,1080
+ExecStart=/usr/bin/google-chrome --remote-debugging-port=9222 --user-data-dir=/home/yc-user/.ozon_parser_chrome --no-first-run --no-default-browser-check --window-position=0,0 --window-size=1440,900
 Restart=always
 RestartSec=5
 

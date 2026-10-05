@@ -264,7 +264,11 @@ def cmd_backfill(args) -> int:
 
     print(f"Дотягиваю полный текст для {len(wanted)} продавца(ов)…")
     print("Откроется Chrome с профилем парсера — нужна залогиненная сессия Ozon.")
-    result = InboxChecker(store, data_dir=DATA_DIR).backfill_texts(wanted)
+    account = None
+    if getattr(args, "account", "main") != "main":
+        from src.outreach.accounts import get_account
+        account = get_account(DATA_DIR, args.account)
+    result = InboxChecker(store, data_dir=DATA_DIR, account=account).backfill_texts(wanted)
 
     for item in result["updated"]:
         text = item["text"].replace("\n", " ")
@@ -322,6 +326,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("backfill", help="дотянуть полный текст ответа из живой сессии")
     p.add_argument("seller", nargs="?", default="",
                    help="seller_id или имя магазина; без аргумента — все ответившие")
+    p.add_argument("--account", default="main",
+                   help="id аккаунта, в чатах которого искать ответы (accounts.json)")
     p.set_defaults(func=cmd_backfill)
 
     return parser

@@ -123,36 +123,70 @@ def plan_sample(reviews: List[dict], max_anchors: int = MAX_ANCHORS_PER_CARD
     return anchors, len(candidates) - len(anchors)
 
 
+def extract_questions_count(card_json: Dict) -> int:
+    """Extracts questions count from the product card."""
+    for key, raw in (card_json or {}).get("widgetStates", {}).items():
+        if not isinstance(raw, str):
+            continue
+        if "webQAProduct" in key or "webQuestion" in key or "webCharacteristicsQA" in key:
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            count = payload.get("questionsCount") or payload.get("unansweredCount") or payload.get("totalCount") or 0
+            if count:
+                try:
+                    return int(count)
+                except (ValueError, TypeError):
+                    pass
+    return 0
+
+
 def sample_from_card(client, card_json: Dict,
-                     max_anchors: int = MAX_ANCHORS_PER_CARD) -> Tuple[int, int]:
+                     max_anchors: int = MAX_ANCHORS_PER_CARD) -> Tuple[int, int, int, float, int]:
     """Снимает сэмпл отзывов с уже полученного JSON карточки товара.
 
-    Возвращает (сколько отзывов рассмотрено, сколько с ответом продавца).
+    Возвращает (seen, replies, unanswered, recent_rating, unanswered_questions).
     Ничего не бросает: сбор не должен падать из-за витального сэмпла.
-    Любая неудача — (0, 0), продавец просто остаётся без пополнения.
+    Любая неудача — нули, продавец просто остаётся без пополнения.
     """
     try:
         url = extract_reviews_url(card_json)
+        unanswered_questions = extract_questions_count(card_json)
+        
         if not url:
-            return 0, 0
+            return 0, 0, 0, 0.0, unanswered_questions
         if reviews_count(card_json) <= 0:
-            return 0, 0
+            return 0, 0, 0, 0.0, unanswered_questions
 
         page_json = client.page(url)
         reviews = parse_reviews(page_json or {})
         if not reviews:
-            return 0, 0
+            return 0, 0, 0, 0.0, unanswered_questions
 
         anchors, unresolved = plan_sample(reviews, max_anchors)
         replies = 0
+        unanswered = 0
+        recent_rating_sum = 0.0
+        
+        for r in reviews:
+            content = r.get("content") or {}
+            recent_rating_sum += float(content.get("score") or 0.0)
+            
+            comments = r.get("comments") or {}
+            if int(comments.get("totalCount") or 0) == 0:
+                unanswered += 1
+
+        recent_rating = round(recent_rating_sum / len(reviews), 2) if reviews else 0.0
+
         for uuid in anchors:
             replies += count_shop_replies(_anchored_comments(client, url, uuid))
 
         seen = len(reviews) - unresolved
-        return max(0, seen), replies
+        return max(0, seen), replies, unanswered, recent_rating, unanswered_questions
     except Exception as exc:                                 # noqa: BLE001
         logger.debug(f"Сэмпл отзывов не удался: {exc}")
-        return 0, 0
+        return 0, 0, 0, 0.0, 0
 
 
 def _anchored_comments(client, reviews_url: str, review_uuid: str) -> List[dict]:

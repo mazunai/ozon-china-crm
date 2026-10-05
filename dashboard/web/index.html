@@ -47,6 +47,16 @@
   .pill.run{background:rgba(59,130,246,.18);color:#8ab4f8}
   .pill.done{background:rgba(52,211,153,.15);color:var(--ok)}
   .pill.err{background:rgba(248,113,113,.16);color:var(--err)}
+  /* Центровый попап состояния сессии: виден и на телефоне, менеджер не
+     пропустит «не авторизован» (правило оператора от 03.10.2026). */
+  #sessionModal{position:fixed;inset:0;background:rgba(8,10,14,.62);display:none;
+    align-items:center;justify-content:center;z-index:9999;padding:16px}
+  #sessionModal .sm-card{background:var(--card);border:1px solid var(--line);
+    border-radius:14px;padding:24px 22px;max-width:460px;width:100%;text-align:center;
+    box-shadow:0 18px 60px rgba(0,0,0,.5)}
+  #sessionModal .sm-icon{font-size:44px;margin-bottom:8px}
+  #sessionModal h2{margin:0 0 10px;font-size:20px;color:var(--err)}
+  #sessionModal p{margin:6px 0;font-size:14px;line-height:1.45}
   .summary{margin-left:auto;display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--dim)}
   .summary b{color:var(--text);font-weight:600}
   nav{display:flex;gap:4px;padding:10px 20px 0;background:rgba(21,26,35,.88);
@@ -374,6 +384,20 @@
 </style>
 </head>
 <body>
+<div id="sessionModal">
+  <div class="sm-card">
+    <div class="sm-icon">⚠️</div>
+    <h2>Сессия Ozon не активна</h2>
+    <p>Ozon не узнаёт аккаунт — рассылка стоит, ответы не приходят.</p>
+    <p class="muted" id="smDetail"></p>
+    <p class="muted">Войти: на VM — noVNC (bash tools/vm_tunnel.sh → localhost:6080/vnc.html)
+      или кнопкой «Войти» во вкладке «Рассылка».</p>
+    <div class="row" style="justify-content:center;gap:10px;margin-top:14px">
+      <button class="primary" id="smCheck">Проверить сейчас</button>
+      <button class="ghost" id="smSnooze">Скрыть на 15 минут</button>
+    </div>
+  </div>
+</div>
 
 <header class="top">
   <span class="logo">O</span>
@@ -392,11 +416,13 @@
 </header>
 
 <nav>
+  <span class="pill" id="sessionPill" title="Сессия Ozon">Сессия: ?</span>
   <button class="tab active" data-view="overview">Обзор</button>
   <button class="tab" data-view="sellers">Продавцы <span class="badge" id="tabCountSellers"></span></button>
   <button class="tab" data-view="rejected">Отсеянные <span class="badge" id="tabCountRejected"></span></button>
   <button class="tab" data-view="harvest">Сбор <span class="badge" id="tabCountHarvest"></span></button>
   <button class="tab" data-view="send">Рассылка <span class="badge" id="tabCountSend"></span></button>
+  <button class="tab" data-view="logs">Логи</button>
 </nav>
 
 <main>
@@ -574,6 +600,8 @@
       <div id="sendChecks" style="margin-top:12px"></div>
     </div>
 
+
+
     <div class="card">
       <h2>Текст сообщения</h2>
       <div class="row">
@@ -598,6 +626,29 @@
         <span class="muted" id="tplVars"></span>
       </div>
       <div id="tplPreview" style="margin-top:12px"></div>
+
+      <div class="row" style="margin-top:18px;border-top:1px solid var(--line);padding-top:14px">
+        <span class="muted">
+          <b>Набор текстов.</b> Вставьте сразу несколько вариантов: каждый начинается
+          строкой «№1 — название», между вариантами можно ставить ⸻ или ---.
+          Строка отписки добавится сама, если её нет. «Сделать актуальными»
+          убирает прежние тексты в templates/archive (ничего не удаляется)
+          и оставляет в ротации только новые.
+        </span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <textarea id="tplBulk" rows="10" spellcheck="false"
+          placeholder="№1 — продажная возможность&#10;текст варианта…&#10;⸻&#10;№2 — следующий вариант…"
+          style="width:100%;font-family:ui-monospace,Menlo,monospace;
+                 background:var(--card2);border:1px solid var(--line);color:var(--text);
+                 border-radius:9px;padding:12px;resize:vertical"></textarea>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="btnTplReplace">Сделать актуальными (замена)</button>
+        <button class="ghost" id="btnTplAppend">Добавить к пулу</button>
+        <span class="spacer"></span>
+        <span class="muted" id="tplBulkStatus">—</span>
+      </div>
     </div>
 
     <div class="card">
@@ -606,9 +657,29 @@
         <label class="check">интервал, мин <input type="number" id="sInterval" min="1" max="1440"></label>
         <label class="check">разброс, мин <input type="number" id="sJitter" min="0" max="120"></label>
         <label class="check">лимит в сутки <input type="number" id="sCap" min="1" max="200"></label>
+        <label class="check">разгон, дней <input type="number" id="sRampDays" min="0" max="60" style="width:64px"></label>
+        <label class="check">разгон со старта <input type="number" id="sRampMinCap" min="1" max="100" style="width:56px"></label>
+        <label class="check"><input type="checkbox" id="sAdaptive"> авто-замедление</label>
         <label class="check">с <input type="text" id="sWindowStart" style="min-width:70px;width:70px"></label>
         <label class="check">до <input type="text" id="sWindowEnd" style="min-width:70px;width:70px"></label>
         <label class="check"><input type="checkbox" id="sFreshFirst"> свежие первыми</label>
+        <label class="check"><input type="checkbox" id="sLoop"> по кругу (ждать очередь)</label>
+      </div>
+      <div class="muted" style="margin-top:8px">Окно 00:00–00:00 значит круглосуточно. «Разброс» случайно сдвигает каждую паузу:
+        интервал 60 ± разброс 20 = письмо раз в 40–80 мин, в среднем час. Лимит 24 в сутки при
+        круглосуточном окне = ~1 сообщение в час, каждый день по кругу.
+        «Разгон»: лимит плавно растёт от стартового до полного за N дней — свежий аккаунт
+        не должен сразу писать много. «Авто-замедление»: при всплеске отказов или нулевой
+        ответности за неделю дневной лимит режется сам. <span id="capToday"></span></div>
+      <div class="row">
+        <label class="check">аккаунт отправителя <input type="text" id="sAccount" style="min-width:110px;width:130px" placeholder="main"></label>
+        <label class="check">повторы:
+          <select id="sRepeatPolicy">
+            <option value="never">никогда</option>
+            <option value="after_days">через N дней</option>
+          </select>
+        </label>
+        <label class="check">N дней <input type="number" id="sRepeatDays" min="0" max="365" style="width:72px"></label>
       </div>
       <div class="row">
         <button class="ghost" id="btnSaveSettings">Сохранить настройки</button>
@@ -640,6 +711,22 @@
         Предпросмотр показывает текст и ничего не меняет в базе. Реальная отправка
         идёт с паузами, в рабочем окне и с дневным лимитом.
       </div>
+      <div class="muted" style="margin-top:6px">Аккаунт отправителя:
+        <b id="sendAccount">—</b>
+        <span class="muted">(каждое сообщение в журнале помечается им; повторные
+        контакты блокируются по общей истории всех аккаунтов)</span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label class="check"><input type="checkbox" id="sFuEnabled"> фоллоу-апы</label>
+        <label class="check">молчит дней <input type="number" id="sFuDays" min="1" max="90" style="width:64px"></label>
+        <label class="check">за проход <input type="number" id="sFuLimit" min="1" max="20" style="width:56px"></label>
+        <button class="ghost" id="btnFuRun">Фоллоу-ап сейчас</button>
+        <button class="ghost" id="btnFuStop">Стоп</button>
+        <span class="muted" id="fuPhase">—</span>
+      </div>
+      <div class="muted" style="margin-top:6px">Сессия Ozon (сторож, проверка раз в 15 мин):
+        <b id="sessionState">—</b> <span class="muted" id="sessionNote"></span>
+      </div>
     </div>
 
     <div class="card">
@@ -660,21 +747,24 @@
     <div class="card">
       <h2>Сбор китайских продавцов</h2>
       <div class="row">
-        <input type="text" id="hUrl" placeholder="ссылка на раздел Ozon Global" style="flex:1;min-width:340px">
+        <input type="text" id="hUrl" placeholder="ссылка на категорию Ozon или слово GLOBAL" style="flex:1;min-width:340px">
       </div>
-      <div class="row">
+      <div class="row" style="margin-top:10px">
         <label class="check">страниц <input type="number" id="hPages" value="50" min="1" max="500"></label>
         <label class="check">пауза, сек <input type="number" id="hDelay" value="0.7" min="0" max="10" step="0.1"></label>
+        <label class="check"><input type="checkbox" id="hLoop"> по кругу 24/7</label>
         <button class="primary" id="btnHarvest">Собрать</button>
         <button class="ghost" id="btnHarvestStop" disabled>Остановить</button>
         <button class="ghost" id="btnHarvestSave">Сохранить настройки</button>
         <span class="spacer"></span>
-        <span class="muted" id="hPhase">—</span>
+        <span class="pill" id="hPill">не идёт</span>
       </div>
-      <div class="bar"><div class="fill" id="hBar"></div></div>
+      <div class="bar" style="margin-top:10px"><div class="fill" id="hBar"></div></div>
+      <div class="muted" id="hLive" style="margin-top:6px;font-weight:600"></div>
+      <div class="metric-grid" id="harvestStats" style="margin-top:12px"></div>
       <div class="muted" style="margin-top:8px" id="hMeta"></div>
       <details>
-        <summary>Ошибки прошлого сбора</summary>
+        <summary>Ошибки сбора</summary>
         <div class="log" id="hErrors" style="height:auto;max-height:240px;white-space:pre-wrap">—</div>
       </details>
     </div>
@@ -713,7 +803,7 @@
     <div class="card">
       <h2>Ночной сбор · запуск кнопкой</h2>
       <div class="row">
-        <input type="text" id="nUrl" placeholder="ссылка на раздел для ночного сбора (пусто — «Товары из Китая»)" style="flex:1;min-width:340px">
+        <input type="text" id="nUrl" placeholder="ссылка на категорию Ozon или GLOBAL (пусто — GLOBAL)" style="flex:1;min-width:340px">
       </div>
       <div class="row" style="margin-top:10px">
         <label class="check">страниц за проход <input type="number" id="nChunk" value="10" min="1" max="100"></label>
@@ -738,6 +828,18 @@
         <summary>Хвост лога ночного сбора</summary>
         <div class="log" id="nightLog" style="height:220px"></div>
       </details>
+    </div>
+  </section>
+
+  <section class="view" id="view-logs">
+    <div class="card">
+      <h2>Живой лог CRM</h2>
+      <div class="row muted" style="margin-bottom:8px">
+        <span>Сбор, рассылка, ночной сбор, ошибки — всё, что делает сервер, в одной ленте.</span>
+        <label class="check"><input type="checkbox" id="logFollow" checked> следить за низом</label>
+      </div>
+      <div class="log" id="logsBox" style="height:62vh;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace"><div class="log-empty">Подключаюсь к потоку событий…</div></div>
+      <div class="muted" style="margin-top:8px">Если лента «замерла» после перезапуска сервера — просто обнови страницу (F5).</div>
     </div>
   </section>
 </main>
@@ -853,6 +955,10 @@
     if (name === "send") { loadSend(); }
     if (name === "overview") { loadStats(); }
     if (name === "harvest") { loadNight(); loadWorker(); }
+    if (name === "logs") {
+      var box = $("logsBox");
+      if (box) { box.scrollTop = box.scrollHeight; }
+    }
   }
   document.querySelectorAll(".tab").forEach(function(t){
     t.addEventListener("click", function(){ showView(t.dataset.view); });
@@ -977,7 +1083,7 @@
     return '<span class="st-dot st-' + esc(status || "new") + '"></span>';
   }
   function statusChip(status){
-    return '<span class="st-chip st-' + esc(status || "new") + '">' + statusDot(status) +
+    return '<span class="st-chip js-status-chip st-' + esc(status || "new") + '">' + statusDot(status) +
       esc(STATUS_LABELS[status] || status || "—") + "</span>";
   }
   // Категория последнего ответа — цветной чип без точки
@@ -1236,6 +1342,23 @@
   });
 
   /* ---------- статусы, выделение ---------- */
+  // Перерисовывает статусный чип и селект в строке/карточке на месте: отметку
+  // менеджера видно мгновенно, без перезагрузки таблицы.
+  function refreshStatusChips(row, status){
+    if (!row) { return; }
+    var sel2 = row.querySelector("select.sel-status");
+    if (sel2) {
+      STATUS_ORDER.forEach(function(s){ sel2.classList.remove("st-" + s); });
+      sel2.classList.add("st-" + status);
+      sel2.value = status;
+    }
+    var chip = row.querySelector(".js-status-chip");
+    if (chip) {
+      var tmp = document.createElement("span");
+      tmp.innerHTML = statusChip(status);
+      chip.replaceWith(tmp.firstChild);
+    }
+  }
   document.addEventListener("change", function(ev){
     var sel = closestTo(ev.target, "select.sel-status");
     if (sel) {
@@ -1243,8 +1366,7 @@
         .then(function(){
           toast("Статус: " + (STATUS_LABELS[sel.value] || sel.value), "ok");
           // Перекрашиваем на месте — в списке сразу видно новую отметку.
-          STATUS_ORDER.forEach(function(s){ sel.classList.remove("st-" + s); });
-          sel.classList.add("st-" + sel.value);
+          refreshStatusChips(sel.closest("tr, .card-seller"), sel.value);
           loadStats();
         })
         .catch(function(err){
@@ -1474,6 +1596,14 @@
   });
 
   /* ---------- сбор ---------- */
+  function harvestCard(cls, label, value, sub){
+    return '<div class="kpi ' + cls + '">' +
+      '<div class="k-top">' + esc(label) + "</div>" +
+      '<div class="k-num">' + esc(typeof value === "number" ? fmtNum(value) : (value || "—")) + "</div>" +
+      (sub ? '<div class="k-sub">' + esc(sub) + "</div>" : "") +
+      "</div>";
+  }
+
   function applyHarvest(h){
     if (!h) { return; }
     var running = !!h.running;
@@ -1481,20 +1611,52 @@
     $("btnHarvestStop").disabled = !running;
     $("btnHarvest").textContent = running ? "Собираю…" : "Собрать";
     $("hBar").style.width = (h.progress || 0) + "%";
-    $("hPhase").textContent = h.phase || "—";
 
+    var live = h.live || {};
     var s = h.stats || {};
+    
+    var nowValue = running ? (live.now_value || (h.progress ? h.progress.toFixed(0) + "%" : "запуск")) : (s.round ? "завершён" : "—");
+    var nowSub = running ? (live.now_sub || h.phase || "в процессе") : (s.cancelled ? "остановлен вручную" : "ожидание запуска");
+    var nextVal = running ? (live.next || (h.pages ? "до " + h.pages + " стр" : "—")) : (h.loop ? "по кругу 24/7" : "—");
+    var nextSub = running ? (h.loop ? "режим 24/7" : "лимит прохода") : (h.loop ? "следующий круг" : "одиночный запуск");
+    
+    var prodVal = live.products !== undefined ? live.products : (s.products !== undefined ? s.products : 0);
+    var sellersVal = live.sellers !== undefined ? live.sellers : (s.sellers !== undefined ? s.sellers : 0);
+    var usccVal = live.uscc !== undefined ? live.uscc : (s.uscc !== undefined ? s.uscc : 0);
+    var chunksVal = live.chunks !== undefined ? live.chunks : (s.chunks || (s.round || (running ? 1 : 0)));
+    var errVal = live.errors !== undefined ? live.errors : (s.errors_count || (s.errors ? s.errors.length : 0));
+
+    var hStatsEl = $("harvestStats");
+    if (hStatsEl) {
+      hStatsEl.innerHTML =
+        harvestCard("kp-blue", "Сейчас", nowValue, nowSub) +
+        harvestCard("kp-blue", "Следующая страница", nextVal, nextSub) +
+        harvestCard("kp-purple", "Товаров", prodVal, "просмотрено карточек") +
+        harvestCard("kp-ok", "Продавцов найдено", sellersVal, "в базе") +
+        harvestCard("kp-ok", "USCC подтверждено", usccVal, "по реквизитам") +
+        harvestCard("kp-blue", "Проходов", chunksVal, "порций / кругов") +
+        harvestCard("kp-err", "Ошибок", errVal, "зафиксировано сбоев");
+    }
+
+    if ($("hLive")) {
+      $("hLive").textContent = running ? (h.phase ? "Фаза: " + h.phase : "Сбор активен") : (s.round ? "Сбор завершён" : "");
+    }
+    if ($("hPill")) {
+      $("hPill").className = "pill " + (running ? "run" : (h.error ? "err" : ""));
+      $("hPill").textContent = running ? "идёт сбор" : (h.error ? "ошибка" : "не идёт");
+    }
+
     if (h.error) {
       $("hMeta").innerHTML = '<span style="color:var(--err)">Ошибка: ' + esc(h.error) + "</span>";
     } else if (running) {
-      $("hMeta").textContent = "Идёт сбор: " + (h.progress || 0).toFixed(0) + "%, страниц " + (h.pages || 0);
+      $("hMeta").textContent = "Идёт сбор: " + (h.progress || 0).toFixed(0) + "% · " + (h.phase || "");
     } else if (s.sellers !== undefined) {
-      $("hMeta").textContent = "Прошлый сбор: товаров " + s.products + ", продавцов " + s.sellers +
-        ", подтверждено по USCC " + s.uscc + ", по складу " + s.warehouse +
-        (s.cancelled ? " (остановлен вручную)" : "");
+      $("hMeta").textContent = "Итог сбора: товаров " + s.products + ", продавцов " + s.sellers +
+        ", подтверждено по USCC " + s.uscc + ", по складу " + (s.warehouse || 0) +
+        (s.cancelled ? " (остановлен)" : "");
     }
     if (s.errors && s.errors.length) {
-      $("hErrors").textContent = s.errors.slice(0, 10).join("\n");
+      $("hErrors").textContent = s.errors.slice(0, 15).join("\n");
     }
     $("statusPill").className = "pill " + (running ? "run" : (h.error ? "err" : ""));
     $("statusPill").textContent = running ? "Сбор идёт" : (h.error ? "Ошибка сбора" : "Ожидание");
@@ -1717,7 +1879,7 @@
     var refresh = parseInt($("nRefresh").value, 10);
     if (isNaN(refresh)) { refresh = 7; }
     var url = $("nUrl").value.trim();
-    if (!confirm("Запустить ночной сбор?\n\nРаздел: " + (url || "«Товары из Китая» (по умолчанию)") +
+    if (!confirm("Запустить ночной сбор?\n\nРаздел: " + (url || "GLOBAL (по умолчанию)") +
                  "\nПойдёт порциями по " + chunk +
                  " страниц, пауза между порциями " + pause + " сек, работать до " + until +
                  ".\nОстановить можно кнопкой в любой момент.")) { return; }
@@ -2235,6 +2397,35 @@
     if (closestTo(ev.target, "[data-reminder]")) { goStatus("replied"); }
   });
 
+  /* ---------- вкладка «Логи» ---------- */
+  var LOG_MAX = 900;
+  function appendLogLine(text) {
+    text = (text || "").trim();
+    if (!text) { return; }
+    var box = $("logsBox");
+    if (!box) { return; }
+    var empty = box.querySelector(".log-empty");
+    if (empty) { empty.remove(); }
+    var div = document.createElement("div");
+    div.textContent = text;
+    box.appendChild(div);
+    while (box.childNodes.length > LOG_MAX) { box.removeChild(box.firstChild); }
+    var follow = $("logFollow");
+    if (!follow || follow.checked) { box.scrollTop = box.scrollHeight; }
+  }
+
+  /* Страховка от «замороженного» UI: SSE-поток мог умереть, пока страница
+     была открыта через перезапуски сервера. Раз в 10 секунд тянем состояние
+     рассылки напрямую — статусы обновляются, даже если поток событий встал. */
+  setInterval(function(){
+    fetch("/api/send").then(function(r){ return r.json(); }).then(function(d){
+      if (d && !d.error) { renderSendState(d.state); }
+    }).catch(function(){});
+    fetch("/api/followup").then(function(r){ return r.json(); }).then(function(fu){
+      renderFuState(fu.state || {});
+    }).catch(function(){});
+  }, 10000);
+
   /* ---------- события сервера ---------- */
   function connect(){
     var es = new EventSource("/api/events");
@@ -2252,8 +2443,10 @@
             wbLog.appendChild(div);
             wbLog.scrollTop = wbLog.scrollHeight;
           }
+          appendLogLine((ev.line || "").trim());
         } else {
           addLog(ev.level, (ev.line || "").trim());
+          appendLogLine((ev.line || "").trim());
         }
       }
       else if (ev.type === "worker") {
@@ -2262,6 +2455,8 @@
       }
       else if (ev.type === "harvest") { applyHarvest(ev); }
       else if (ev.type === "send") {
+        appendLogLine("▶ рассылка: " + (ev.phase || "") + " (отправлено " + (ev.sent || 0) +
+                      ", ошибок " + (ev.failed || 0) + ")");
         renderSendState(ev);
         if (ev.last_event && ev.last_event.kind === "sent") {
           toast("Отправлено: " + (ev.last_event.shop || ""), "ok");
@@ -2271,11 +2466,23 @@
         }
       }
       else if (ev.type === "send_done") {
+        appendLogLine("✔ рассылка завершена: отправлено " + ((ev.stats||{}).sent || 0) +
+                      ", ошибок " + ((ev.stats||{}).failed || 0) +
+                      (ev.error ? ", ошибка: " + ev.error : ""));
         renderSendState({running:false, phase:"Готово", sent:(ev.stats||{}).sent || 0,
                          failed:(ev.stats||{}).failed || 0, error:ev.error || ""});
         if (ev.error) { toast("Отправка не удалась: " + ev.error, "err"); }
         loadSend();
         loadTable("sellers");
+        loadStats();
+      }
+
+      else if (ev.type === "seller_update") {
+        // Отметку менеджера (например «написал») видят ВСЕ открытые дашборды
+        // мгновенно: чип и селект в строке обновляются на месте.
+        if (ev.marketplace && ev.marketplace !== MARKETPLACE) { return; }
+        var row = document.querySelector('[data-seller="' + ev.seller_id + '"]');
+        if (row) { refreshStatusChips(row, ev.status); }
         loadStats();
       }
       else if (ev.type === "harvest_done") {
@@ -2415,10 +2622,11 @@
     postJson("/api/harvest", {
       url: url,
       pages: parseInt($("hPages").value, 10) || 50,
-      delay: parseFloat($("hDelay").value)
+      delay: parseFloat($("hDelay").value),
+      loop: $("hLoop") && $("hLoop").checked
     }).then(function(){
-      toast("Сбор запущен", "ok");
-      addLog("INFO", "Запущен сбор: " + url);
+      toast($("hLoop") && $("hLoop").checked ? "Сбор запущен по кругу 24/7" : "Сбор запущен", "ok");
+      addLog("INFO", "Запущен сбор" + ($("hLoop") && $("hLoop").checked ? " (по кругу 24/7)" : "") + ": " + url);
     }).catch(function(err){
       $("btnHarvest").disabled = false;
       toast("Не удалось запустить: " + err.message, "err");
@@ -2488,9 +2696,33 @@
       $("sInterval").value = s.interval_minutes;
       $("sJitter").value = s.interval_jitter_minutes;
       $("sCap").value = s.daily_cap;
+      $("sRampDays").value = s.ramp_days != null ? s.ramp_days : 0;
+      $("sRampMinCap").value = s.ramp_min_cap != null ? s.ramp_min_cap : 4;
+      $("sAdaptive").checked = s.adaptive_slowdown !== false;
       $("sWindowStart").value = s.window_start;
       $("sWindowEnd").value = s.window_end;
       $("sFreshFirst").checked = !!s.fresh_first;
+      $("sLoop").checked = !!s.loop;
+      $("sAccount").value = s.sender_account_id || "main";
+      $("sRepeatPolicy").value = s.repeat_contact_policy || "never";
+      $("sRepeatDays").value = s.repeat_after_days != null ? s.repeat_after_days : 30;
+      $("sendAccount").textContent = s.sender_account_id || "main";
+      $("capToday").textContent = d.cap_today ?
+        "Лимит сегодня: " + d.cap_today + " (в настройках: " + s.daily_cap + ")." : "";
+      fetch("/api/followup").then(function(r){ return r.json(); }).then(function(fu){
+        var f = fu.settings || {};
+        $("sFuEnabled").checked = !!f.enabled;
+        $("sFuDays").value = f.after_days != null ? f.after_days : 14;
+        $("sFuLimit").value = f.limit_per_round != null ? f.limit_per_round : 5;
+        renderFuState(fu.state || {});
+      }).catch(function(){});
+      fetch("/api/watchdog").then(function(r){ return r.json(); }).then(function(w){
+        var ok = w.logged_in === true, bad = w.logged_in === false;
+        $("sessionState").textContent = ok ? "✓ ок, проверено " + (w.last_check || "")
+                                 : bad ? "⚠ слетела!" : "ещё не проверялась";
+        $("sessionState").style.color = bad ? "var(--err)" : "";
+        $("sessionNote").textContent = w.note || "";
+      }).catch(function(){});
       loadTemplate();
       var stopInfo = (d.preflight.checks || []).filter(function(c){ return c.key === "stop"; })[0];
       $("stopFileInfo").textContent = stopInfo ? stopInfo.detail : "—";
@@ -2548,6 +2780,24 @@
       .catch(function(err){ toast("Не сохранено: " + err.message, "err"); });
   });
 
+  function importTemplates(mode){
+    var text = $("tplBulk").value;
+    if (!text.trim()) { $("tplBulkStatus").textContent = "Сначала вставьте тексты выше"; return; }
+    $("tplBulkStatus").textContent = "Импортирую…";
+    postJson("/api/send/templates/import", {text: text, mode: mode})
+      .then(function(res){
+        $("tplBulkStatus").textContent = res.ok ?
+          ("Активных шаблонов: " + res.active +
+           (res.archived ? " | в архив: " + res.archived : "") +
+           ((res.warnings || []).length ? " | предупреждения: " + res.warnings.join("; ") : "")) :
+          ("Ошибка: " + res.error);
+        if (res.ok) { toast("Импортировано: " + (res.imported || []).join(", "), "ok"); }
+      })
+      .catch(function(err){ $("tplBulkStatus").textContent = "Ошибка: " + err.message; });
+  }
+  $("btnTplReplace").addEventListener("click", function(){ importTemplates("replace"); });
+  $("btnTplAppend").addEventListener("click", function(){ importTemplates("append"); });
+
   $("btnPreviewMessage").addEventListener("click", function(){
     fetch("/api/send/preview-message").then(function(r){ return r.json(); }).then(function(d){
       if (d.error) { throw new Error(d.error); }
@@ -2570,14 +2820,71 @@
     postJson("/api/send/check-login", {}).then(function(res){
       toast(res.logged_in ? "Вход подтверждён" : ("Вход не подтверждён: " + (res.error || "")),
             res.logged_in ? "ok" : "err");
+      if (res.logged_in) { applySessionState({logged_in: true, last_check: "только что"}); }
     }).catch(function(err){
       toast("Не удалось проверить: " + err.message, "err");
     }).then(function(){
       btn.disabled = false;
       btn.textContent = "Проверить вход в Ozon";
       loadSend();
+      pollSession();
     });
   });
+
+  /* ---------- сессия Ozon: пилюля в шапке + попап ---------- */
+  // Пилюля и попап живут на ВСЕХ вкладках и обновляются раз в 10 секунд —
+  // менеджер с телефона видит «не авторизован» так же, как с компьютера.
+  var smLast = null;
+  function applySessionState(w){
+    smLast = w;
+    var ok = w.logged_in === true, bad = w.logged_in === false;
+    var pill = $("sessionPill");
+    if (pill) {
+      pill.className = "pill" + (ok ? " done" : bad ? " err" : "");
+      pill.textContent = ok ? "Сессия: ✓"
+        : bad ? "Сессия: ✗ не авторизован" : "Сессия: не проверялась";
+      pill.title = (ok ? "ок, проверено " : bad ? "СЛОТЕЛА, проверено "
+        : "ещё не проверялась · ") + (w.last_check || "");
+    }
+    var m = $("sessionModal");
+    if (!m) { return; }
+    var snooze = parseInt(localStorage.getItem("sessionModalSnooze") || "0", 10);
+    if (bad && Date.now() > snooze) {
+      m.style.display = "flex";
+      $("smDetail").textContent = w.note || "";
+    } else {
+      m.style.display = "none";
+    }
+  }
+  function pollSession(){
+    fetch("/api/watchdog").then(function(r){ return r.json(); })
+      .then(applySessionState).catch(function(){});
+  }
+  pollSession();
+  setInterval(pollSession, 10000);
+  if ($("smCheck") && $("smSnooze") && $("sessionModal")) $("smCheck").addEventListener("click", function(){
+    var btn = $("smCheck");
+    btn.disabled = true; btn.textContent = "Проверяю…";
+    postJson("/api/send/check-login", {}).then(function(res){
+      toast(res.logged_in ? "Вход подтверждён" : ("Не подтверждён: " + (res.error || "")),
+            res.logged_in ? "ok" : "err");
+      if (res.logged_in) { applySessionState({logged_in: true, last_check: "только что"}); }
+    }).catch(function(err){
+      toast("Не удалось проверить: " + err.message, "err");
+    }).then(function(){
+      btn.disabled = false; btn.textContent = "Проверить сейчас";
+      pollSession();
+    });
+  });
+  if ($("smSnooze")) $("smSnooze").addEventListener("click", function(){
+    localStorage.setItem("sessionModalSnooze", String(Date.now() + 15 * 60 * 1000));
+    $("sessionModal").style.display = "none";
+    toast("Попап скрыт на 15 минут — пилюля в шапке останется");
+  });
+
+
+
+
   $("btnCheckInbox").addEventListener("click", function(){
     // Открывает список чатов Ozon и помечает «ответил» тем, у кого
     // появились непрочитанные входящие.
@@ -2607,11 +2914,38 @@
       interval_minutes: parseInt($("sInterval").value, 10),
       interval_jitter_minutes: parseInt($("sJitter").value, 10),
       daily_cap: parseInt($("sCap").value, 10),
-      window_start: $("sWindowStart").value.trim(),
-      window_end: $("sWindowEnd").value.trim(),
-      fresh_first: $("sFreshFirst").checked
+      ramp_days: parseInt($("sRampDays").value, 10) || 0,
+      ramp_min_cap: parseInt($("sRampMinCap").value, 10) || 4,
+      adaptive_slowdown: $("sAdaptive").checked,
+      window_start: $("sWindowStart").value.trim() || "00:00",
+      window_end: $("sWindowEnd").value.trim() || "00:00",
+      loop: $("sLoop").checked,
+      fresh_first: $("sFreshFirst").checked,
+      sender_account_id: $("sAccount").value.trim() || "main",
+      repeat_contact_policy: $("sRepeatPolicy").value,
+      repeat_after_days: parseInt($("sRepeatDays").value, 10) || 0
+    }).then(function(){
+      return postJson("/api/followup/settings", {
+        enabled: $("sFuEnabled").checked,
+        after_days: parseInt($("sFuDays").value, 10) || 14,
+        limit_per_round: parseInt($("sFuLimit").value, 10) || 5
+      });
     }).then(function(){ toast("Настройки сохранены", "ok"); loadSend(); })
       .catch(function(err){ toast("Не сохранилось: " + err.message, "err"); });
+  });
+  function renderFuState(st){
+    $("fuPhase").textContent = st.running ? (st.phase || "идёт") :
+      (st.last_report && (st.last_report.reason || ("отправлено " + (st.last_report.sent || 0)))) || "—";
+    $("btnFuRun").disabled = !!st.running;
+  }
+  $("btnFuRun").addEventListener("click", function(){
+    if (!confirm("Отправить фоллоу-апы тем, кто молчит? Это повторные сообщения — убедись, что текст followup.txt готов.")) { return; }
+    postJson("/api/followup/run", {}).then(function(){
+      toast("Фоллоу-ап запущен", "ok");
+    }).catch(function(err){ toast("Не удалось: " + err.message, "err"); });
+  });
+  $("btnFuStop").addEventListener("click", function(){
+    postJson("/api/followup/stop", {}).then(function(){ toast("Останавливаю фоллоу-ап…"); });
   });
   $("btnSendPreview").addEventListener("click", function(){
     $("btnSendPreview").disabled = true;
@@ -2702,5 +3036,6 @@
   });
 })();
 </script>
+
 </body>
 </html>

@@ -1,0 +1,13 @@
+diff --git a/test/test_outreach.py b/test/test_outreach.py
+index 30aed0a..253caf8 100644
+--- a/test/test_outreach.py
++++ b/test/test_outreach.py
+@@ -102,7 +102,7 @@ def test_score_parts_present():
+     seller = SellerMetrics.from_raw("1", orders_count="1 K", reviews_count="100",
+                                    working_time="1 год", average_rating="5 из 5")
+     score_all([seller])
+-    assert set(seller.score_parts) == {"orders", "reviews", "tenure", "rating"}
++    assert set(seller.score_parts) == {"orders", "reviews", "tenure", "rating", "overwhelmed", "cost_saving"}
+     total = sum(seller.score_parts.values())
+     assert abs(total - seller.score) < 0.01, "сумма слагаемых не совпала со score"
+ 

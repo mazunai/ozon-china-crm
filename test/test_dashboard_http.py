@@ -169,6 +169,10 @@ def main() -> int:
         code, _ = get("/api/sellers/export.csv?marketplace=%0d%0aX-Injected:%201")
         check(code in (400, 200), "кривой marketplace не роняет сервер")
 
+        print("Мультиаккаунт выведен из эксплуатации — маршрутов /api/accounts больше нет")
+        code, _ = get("/api/accounts")
+        check(code in (404, 501), "маршрут /api/accounts убран")
+
         httpd.shutdown()
 
     print(f"\nРезультат: {PASSED}/{TOTAL} кейсов прошло")

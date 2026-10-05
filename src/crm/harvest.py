@@ -762,16 +762,20 @@ class ChinaSellerHarvester:
         if seller_id in self._vitality_sampled:
             return
         self._vitality_sampled.add(seller_id)
-        seen, replies = sample_from_card(self.client, card_json)
-        if seen > 0:
-            self._vitality_pending[seller_id] = (seen, replies)
+        seen, replies, unanswered, recent_rating, unanswered_questions = sample_from_card(self.client, card_json)
+        if seen > 0 or unanswered_questions > 0:
+            self._vitality_pending[seller_id] = (seen, replies, unanswered, recent_rating, unanswered_questions)
 
     def _flush_vitality(self) -> None:
         """Записывает накопленные сэмплы в базу (кумулятивно по продавцу)."""
         if self.store is None or not self._vitality_pending:
             return
         recorded = 0
-        for seller_id, (seen, replies) in self._vitality_pending.items():
+        for seller_id, sample_data in self._vitality_pending.items():
+            if len(sample_data) == 5:
+                seen, replies, unanswered, recent_rating, unanswered_questions = sample_data
+            else:
+                seen, replies = sample_data
             if self.store.record_review_sample(seller_id, seen, replies):
                 recorded += 1
         self.stats.vitality_samples += recorded
@@ -905,6 +909,17 @@ class ChinaSellerHarvester:
                 "даже если товар едет из Китая"
             )
 
+        vitality = self._vitality_pending.get(seller_id)
+        if vitality and len(vitality) == 5:
+            seen, replies, unanswered, recent_rating, unanswered_questions = vitality
+        else:
+            seen = replies = unanswered = unanswered_questions = 0
+            recent_rating = 0.0
+
+        from .vitality import vitality_category
+        v_category = vitality_category(seen, replies) if seen > 0 else "unknown"
+        pain_score = unanswered + unanswered_questions
+
         metrics = SellerMetrics.from_raw(
             seller_id=seller_id,
             orders_count=parsed.get("orders_count", ""),
@@ -924,6 +939,12 @@ class ChinaSellerHarvester:
             verified_by=verified,
             chinese_reasons="; ".join(reasons),
         )
+        
+        metrics.recent_rating = recent_rating
+        metrics.unanswered_reviews = unanswered
+        metrics.unanswered_questions = unanswered_questions
+        metrics.pain_score = float(pain_score)
+        metrics.vitality_category = v_category
 
         if verified == VERIFY_USCC:
             self.stats.sellers_verified_uscc += 1

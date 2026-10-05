@@ -131,6 +131,11 @@ CRM_COLUMNS = {
     "replies_seen": "INTEGER NOT NULL DEFAULT 0",
     # Когда сэмпл отзывов приходил последний раз — свежесть данных о живости.
     "reviews_checked_at": "TEXT NOT NULL DEFAULT ''",
+    "recent_rating": "REAL NOT NULL DEFAULT 0.0",
+    "unanswered_reviews": "INTEGER NOT NULL DEFAULT 0",
+    "unanswered_questions": "INTEGER NOT NULL DEFAULT 0",
+    "pain_score": "REAL NOT NULL DEFAULT 0.0",
+    "vitality_category": "TEXT NOT NULL DEFAULT 'unknown'",
 }
 
 # Журнал отправок. В sellers.message_sent хранится только последнее сообщение
@@ -189,7 +194,12 @@ CREATE TABLE IF NOT EXISTS sellers (
     handed_to_manager_at TEXT NOT NULL DEFAULT '',
     reviews_seen        INTEGER NOT NULL DEFAULT 0,
     replies_seen        INTEGER NOT NULL DEFAULT 0,
-    reviews_checked_at  TEXT NOT NULL DEFAULT ''
+    reviews_checked_at  TEXT NOT NULL DEFAULT '',
+    recent_rating       REAL NOT NULL DEFAULT 0.0,
+    unanswered_reviews  INTEGER NOT NULL DEFAULT 0,
+    unanswered_questions INTEGER NOT NULL DEFAULT 0,
+    pain_score          REAL NOT NULL DEFAULT 0.0,
+    vitality_category   TEXT NOT NULL DEFAULT 'unknown'
 );
 """
 
@@ -273,7 +283,8 @@ SELECT_FIELDS = (
     "seller_profile_url, sample_product_url, status, notes, attempts, last_attempt_at, "
     "last_error, message_sent, first_seen_at, last_seen_at, product_count, chinese_reasons, "
     "sent_at, metrics_at, stage, reply_category, reply_at, handed_to_manager_at, "
-    "reviews_seen, replies_seen, reviews_checked_at"
+    "reviews_seen, replies_seen, reviews_checked_at, "
+    "recent_rating, unanswered_reviews, unanswered_questions, pain_score, vitality_category"
 )
 
 
@@ -394,7 +405,12 @@ class SellerStore:
                                sample_product_url = CASE WHEN sample_product_url = '' THEN ? ELSE sample_product_url END,
                                chinese_reasons = CASE WHEN ? != '' THEN ? ELSE chinese_reasons END,
                                last_seen_at = ?, updated_at = ?,
-                               metrics_at = CASE WHEN ? != '' THEN ? ELSE metrics_at END
+                               metrics_at = CASE WHEN ? != '' THEN ? ELSE metrics_at END,
+                               recent_rating = CASE WHEN ? > 0 THEN ? ELSE recent_rating END,
+                               unanswered_reviews = CASE WHEN ? >= 0 THEN ? ELSE unanswered_reviews END,
+                               unanswered_questions = CASE WHEN ? >= 0 THEN ? ELSE unanswered_questions END,
+                               pain_score = CASE WHEN ? > 0 THEN ? ELSE pain_score END,
+                               vitality_category = CASE WHEN ? != 'unknown' THEN ? ELSE vitality_category END
                            WHERE seller_id = ?""",
                         (
                             s.shop_name, s.company_name,
@@ -411,6 +427,11 @@ class SellerStore:
                             # metrics_at двигаем только при реальных данных:
                             # пустой замок не должен «освежать» продавца
                             (now if (s.orders or s.reviews or s.uscc) else ""), now,
+                            getattr(s, "recent_rating", 0.0), getattr(s, "recent_rating", 0.0),
+                            getattr(s, "unanswered_reviews", 0), getattr(s, "unanswered_reviews", 0),
+                            getattr(s, "unanswered_questions", 0), getattr(s, "unanswered_questions", 0),
+                            getattr(s, "pain_score", 0.0), getattr(s, "pain_score", 0.0),
+                            getattr(s, "vitality_category", "unknown"), getattr(s, "vitality_category", "unknown"),
                             s.seller_id,
                         ),
                     )
@@ -422,8 +443,9 @@ class SellerStore:
                                is_chinese, verified_by, registration_kind,
                                seller_profile_url, sample_product_url, chinese_reasons,
                                status, first_seen_at, last_seen_at, created_at, updated_at,
-                               metrics_at
-                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               metrics_at, recent_rating, unanswered_reviews,
+                               unanswered_questions, pain_score, vitality_category
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             s.seller_id, s.shop_name, s.company_name, s.uscc, s.province,
                             s.orders, s.reviews, s.months_on_ozon, s.rating, s.score,
@@ -433,6 +455,11 @@ class SellerStore:
                             s.sample_product_url,
                             getattr(s, "chinese_reasons", "") or "",
                             STATUS_NEW, now, now, now, now, now,
+                            getattr(s, "recent_rating", 0.0),
+                            getattr(s, "unanswered_reviews", 0),
+                            getattr(s, "unanswered_questions", 0),
+                            getattr(s, "pain_score", 0.0),
+                            getattr(s, "vitality_category", "unknown"),
                         ),
                     )
                     added += 1

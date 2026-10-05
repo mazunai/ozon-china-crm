@@ -22,7 +22,30 @@ KEY="${OZON_VM_KEY:-$HOME/.ssh/ozon_crm_cloud}"
 REMOTE_DIR="/home/yc-user/parser"
 # Ключ хоста зафиксирован в deploy/vm_known_hosts (аудит: без проверки
 # ключа MITM на этом канале получает .env). Обновить: ssh-keyscan -H <host>
-SSH_OPTS=(-i "$KEY" -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$(dirname "$0")/vm_known_hosts" -o ConnectTimeout=15)
+# (аудит 30.09.2026: путь раньше указывал на tools/ — файла там нет, и любой
+# вызов с StrictHostKeyChecking=yes падал на проверке ключа хоста)
+KNOWN_HOSTS="$(cd "$(dirname "$0")/.." && pwd)/deploy/vm_known_hosts"
+SSH_OPTS=(-i "$KEY" -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KNOWN_HOSTS" -o ConnectTimeout=15)
+
+# VPN на Mac (hidemyname и подобные) глушит соединения до Яндекса — см.
+# AGENTS.md, раздел про VPN. Привязываем ssh к физическому интерфейсу,
+# если через него соединение проходит. Пробу повторяем: маршрут через VPN
+# иногда рвётся и одиночная проверка ложно проваливается.
+IFACE="${OZON_VM_IFACE:-en0}"
+BOUND=0
+for _ in 1 2 3; do
+  if ssh -i "$KEY" -o StrictHostKeyChecking=yes \
+         -o UserKnownHostsFile="$KNOWN_HOSTS" \
+         -o BindInterface="$IFACE" -o ConnectTimeout=8 -o BatchMode=yes \
+         "$VM" true 2>/dev/null; then
+    SSH_OPTS+=(-o BindInterface="$IFACE")
+    echo "SSH идёт через $IFACE (в обход VPN)"
+    BOUND=1
+    break
+  fi
+  sleep 2
+done
+[ "$BOUND" = 1 ] || echo "ВНИМАНИЕ: привязка к $IFACE не прошла — идём штатным маршрутом"
 RESTART=1
 WITH_ENV=0
 for arg in "$@"; do

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Ежедневный снимок базы + офсайт-выгрузка (--push) с мака.
+       Аудит: основная машина с данными не имела расписания бэкапов. -->
+  <key>Label</key><string>com.ozon-crm.backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/maxim/Documents/разработки123/parser_ozon/repo/.venv/bin/python</string>
+    <string>tools/backup_db.py</string>
+    <string>--push</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/maxim/Documents/разработки123/parser_ozon/repo</string>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key>
+  <string>/Users/maxim/Documents/разработки123/parser_ozon/repo/logs/backup_launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/maxim/Documents/разработки123/parser_ozon/repo/logs/backup_launchd.log</string>
+</dict>
+</plist>

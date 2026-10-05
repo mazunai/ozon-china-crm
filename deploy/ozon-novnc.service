@@ -1,0 +1,15 @@
+[Unit]
+Description=noVNC (веб-доступ к рабочему столу VM через браузер)
+After=network.target x11vnc.service
+Requires=x11vnc.service
+
+[Service]
+User=yc-user
+# Слушаем 127.0.0.1, наружу отдаём через SSH-туннель:
+#   ssh -L 6080:127.0.0.1:6080 yc-user@<vm>   ->   http://localhost:6080/vnc.html
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc 127.0.0.1:6080 127.0.0.1:5900
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

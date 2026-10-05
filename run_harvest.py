@@ -49,7 +49,7 @@ DB_PATH = DATA_DIR / "sellers.sqlite3"
 
 # Раздел Ozon Global с товарами из Китая. Проверено: товары там китайские
 # (11 из 11 на страницах 1, 2, 3 и 50).
-DEFAULT_SECTION = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/"
+DEFAULT_SECTION = "GLOBAL"
 
 
 def open_store() -> SellerStore:

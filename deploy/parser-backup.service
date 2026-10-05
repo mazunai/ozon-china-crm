@@ -11,4 +11,4 @@ Type=oneshot
 User=yc-user
 Group=yc-user
 WorkingDirectory=/home/yc-user/parser
-ExecStart=/home/yc-user/parser/.venv/bin/python /home/yc-user/parser/tools/backup_db.py
+ExecStart=/home/yc-user/parser/.venv/bin/python /home/yc-user/parser/tools/backup_db.py --push

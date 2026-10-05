@@ -29,11 +29,14 @@ import logging
 import random
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from .queue_db import OutreachQueue
+from .accounts import SenderAccount
+from .templates import TemplatePool
+from ..crm.risk import PlatformRestricted, load_extra_markers
 from ..crm.store import STATUS_NEW
 
 logger = logging.getLogger(__name__)
@@ -52,6 +55,32 @@ class SenderConfig:
     fresh_first: bool = False           # сначала только что найденные сбором
     dry_run: bool = True                # по умолчанию НЕ отправляем, а показываем
     stop_file: str = "STOP"
+    # Backoff при СЕРИЙНЫХ сбоях (сеть, браузер, страница не та). Это не обход
+    # антифрода: пауза нужна, чтобы техническая авария не превращалась в
+    # бесконечный долбёж по очереди. При признаках ограничения платформы
+    # работает Risk Control (полная остановка), а не этот backoff.
+    backoff_base_minutes: int = 5       # пауза после 1-го сбоя серии
+    backoff_max_minutes: int = 60       # потолок паузы (удвоение до него)
+    max_consecutive_failures: int = 5   # столько сбоев подряд — стоп прогона
+    # Аккаунт отправителя (у менеджеров их несколько) и политика повторных
+    # контактов. История у продавца ОДНА общая: перед отправкой смотрим в неё
+    # целиком, а не только в историю текущего аккаунта.
+    sender_account_id: str = "main"
+    repeat_contact_policy: str = "never"  # never | after_days
+    repeat_after_days: int = 30           # для after_days: минимум дней с контакта
+    # Режим «по кругу»: пустая очередь — не финиш, а ожидание пополнения
+    # (свежие продавцы приходят сбором). Прогон крутится сутки напролёт:
+    # дневной лимит и рабочее окно по-прежнему действуют.
+    loop: bool = False
+    # Плавный разгон свежего аккаунта: дневной лимит растёт линейно от
+    # ramp_min_cap до daily_cap за ramp_days суток. 0 — сразу полный лимит.
+    # Дата старта фиксируется при первом запуске (ramp_start_date).
+    ramp_days: int = 0
+    ramp_min_cap: int = 4
+    # Авто-замедление: при всплеске отказов или нулевой ответности за неделю
+    # дневной лимит режется (adaptive_cap_factor) — сигнал «жмём», а не повод
+    # гнать объём дальше.
+    adaptive_slowdown: bool = True
 
     @classmethod
     def load(cls, path: Path) -> "SenderConfig":
@@ -116,7 +145,14 @@ def parse_window(start: str, end: str) -> Tuple[dtime, dtime]:
 
 
 def in_window(now: dtime, start: dtime, end: dtime) -> bool:
-    """Внутри ли рабочего окна. Поддерживает окно через полночь (22:00–06:00)."""
+    """Внутри ли рабочего окна.
+
+    Поддерживает окно через полночь (22:00–06:00). Границы, равные друг другу
+    (00:00–00:00), означают круглосуточно: иначе окно вырождалось бы в одну
+    секунду полуночи, и круглосуточный режим через настройки было не задать.
+    """
+    if start == end:
+        return True
     if start <= end:
         return start <= now <= end
     return now >= start or now <= end
@@ -134,17 +170,22 @@ def should_send_now(
     config: SenderConfig,
     sent_last_24h: int,
     next_allowed_at: Optional[datetime] = None,
+    effective_cap: Optional[int] = None,
 ) -> SendDecision:
     """Разрешать ли отправку прямо сейчас.
 
     Проверки по порядку: стоп-кран, дневной лимит, рабочее окно, интервал с
     прошлой отправки. Возвращает причину отказа и сколько ждать — это попадает
     в лог, чтобы в режиме ожидания было понятно, чего именно ждём.
+
+    `effective_cap` — сегодняшний лимит с учётом разгона, суточного джиттера
+    и авто-замедления (effective_daily_cap); без него берётся config.daily_cap.
     """
-    if not config.dry_run and sent_last_24h >= config.daily_cap:
+    cap = max(effective_cap, 1) if effective_cap is not None else config.daily_cap
+    if not config.dry_run and sent_last_24h >= cap:
         return SendDecision(
             False,
-            f"дневной лимит {config.daily_cap} исчерпан",
+            f"дневной лимит {cap} исчерпан",
             retry_in_seconds=3600,
         )
 
@@ -185,6 +226,215 @@ def kill_switch_active(stop_file: Path) -> bool:
     return stop_file.exists()
 
 
+def failed_round_pause_seconds(rng: Optional[random.Random] = None) -> int:
+    """Пауза после витка, где сообщение НЕ ушло: чат закрыт, сбой виджета,
+    ошибка отправки.
+
+    Продавец ничего не получил, очередь не сдвинулась — долго стоять незачем.
+    Пара секунд только чтобы не превращать проход по очереди из закрытых
+    личек в пулемётную очередь страниц: каждая из них всё же визит в Ozon.
+    """
+    rng = rng or random.Random()
+    return rng.randint(5, 15)
+
+
+def ramp_daily_cap(target: int, ramp_days: int, start_cap: int, days_elapsed: int) -> int:
+    """Дневной лимит на N-й день разгона: линейно от start_cap к target.
+
+    Свежий аккаунт, который в первый же день пишет 20+ человек, выглядит
+    как включённый скрипт: объём должен расти по мере «прогрева» истории.
+    """
+    if ramp_days <= 0 or days_elapsed >= ramp_days:
+        return max(target, 1)
+    start_cap = max(min(start_cap, target), 1)
+    progress = max(days_elapsed, 0) / ramp_days
+    return max(round(start_cap + progress * (target - start_cap)), 1)
+
+
+def day_jitter_cap(cap: int, day_key: str, spread: float = 0.1) -> int:
+    """Случайное отклонение дневного лимита, стабильное внутри суток.
+
+    Ровно 24 каждый день — тоже паттерн: живой объём гуляет туда-сюда.
+    Зерно — дата, поэтому в течение дня число не меняется и попадает в лог
+    одинаково при каждом обновлении статуса.
+    """
+    rng = random.Random(f"daily-cap:{day_key}")
+    return max(round(cap * (1 + rng.uniform(-spread, spread))), 1)
+
+
+def adaptive_cap_factor(replied: int, negative: int, contacted: int,
+                        min_sample: int = 20) -> float:
+    """Множитель дневного лимита по откликам получателей за окно.
+
+    Мало данных — не судим. Каждый пятый отказ или просьба не писать —
+    «жмём», лимит вполовину. Ноль ответов при достаточной выборке — текст
+    или таргетинг не работают: минус четверть, а не ускорение.
+    """
+    if contacted < min_sample:
+        return 1.0
+    if negative / contacted > 0.2:
+        return 0.5
+    if replied == 0:
+        return 0.75
+    return 1.0
+
+
+def ramp_start_date(data_dir: Path, today: date) -> date:
+    """Дата старта разгона — день первого запуска с включённым режимом.
+
+    Живёт в outreach_data/ramp.json: перезапуск прогона разгон не сбрасывает,
+    «начать заново» = удалить файл. Кривой или нечитаемый файл считается
+    новым стартом: безопаснее медленный старт, чем внезапный полный лимит.
+    """
+    path = Path(data_dir) / "ramp.json"
+    if path.exists():
+        try:
+            return date.fromisoformat(
+                json.loads(path.read_text(encoding="utf-8"))["started"])
+        except (OSError, ValueError, KeyError):
+            pass
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"started": today.isoformat()}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    return today
+
+
+def effective_daily_cap(config: "SenderConfig", now: datetime,
+                        feedback: Optional[dict] = None,
+                        ramp_started: Optional[date] = None) -> int:
+    """Дневной лимит на сегодня: разгон × суточный джиттер × авто-замедление.
+
+    `ramp_started` — дата старта разгона (ramp_start_date), `feedback` —
+    словарь outreach_feedback() из базы. Оба параметра опциональны: нет
+    данных — соответствующий множитель просто не применяется.
+    """
+    cap = config.daily_cap
+    if config.ramp_days > 0 and ramp_started is not None:
+        cap = ramp_daily_cap(cap, config.ramp_days, config.ramp_min_cap,
+                             (now.date() - ramp_started).days)
+    cap = day_jitter_cap(cap, now.date().isoformat())
+    if config.adaptive_slowdown and feedback:
+        cap = round(cap * adaptive_cap_factor(feedback.get("replied", 0),
+                                              feedback.get("negative", 0),
+                                              feedback.get("contacted", 0)))
+    return max(cap, 1)
+
+
+def backoff_seconds(consecutive_failures: int, base_minutes: int, max_minutes: int) -> int:
+    """Пауза после N сбоев подряд: удвоение от base до потолка max.
+
+    Чистая функция — покрыта тестами. Первый сбой серии ещё не серия: пауза
+    начинается со второго подряд (consecutive_failures >= 2).
+    """
+    if consecutive_failures < 2:
+        return 0
+    base = max(base_minutes, 0) * 60
+    ceiling = max(max_minutes, base_minutes) * 60
+    return min(base * (2 ** (consecutive_failures - 2)), ceiling)
+
+
+def repeat_contact_allowed(policy: str, after_days: int, prior_sent_at: str,
+                           now: datetime) -> Tuple[bool, str]:
+    """Можно ли писать продавцу, у которого уже есть успешная отправка.
+
+    Глобальная защита от дублей между аккаунтами: политика смотрит на общую
+    историю продавца, независимо от того, какой аккаунт писал. 'never' —
+    повторов нет никогда (по умолчанию); 'after_days' — кампания фоллоу-апа
+    по истечении срока. Пустая/кривая дата прошлого контакта при 'never'
+    всё равно запрещает: нет данных — пишем без разрешения нельзя.
+    """
+    if policy == "after_days":
+        try:
+            prev = datetime.fromisoformat(prior_sent_at)
+        except (TypeError, ValueError):
+            return False, "дата прошлого контакта не читается — повтор запрещён"
+        wait = timedelta(days=max(int(after_days), 0))
+        if now - prev >= wait:
+            return True, ""
+        left_days = max((wait - (now - prev)).days, 0)
+        return False, (f"прошлый контакт {prev.date()}, повтор возможен "
+                       f"через {left_days} дн. (после {after_days})")
+    return False, f"повторные контакты запрещены политикой ({policy})"
+
+
+def raise_if_platform_restricted(driver, extra_markers: tuple = (), stage: str = "") -> None:
+    """Бросает PlatformRestricted, если на странице маркеры ограничения.
+
+    Общая точка для всех мест, где sender показывает Ozon страницу: стартовая
+    проверка входа, переподключение, каждая открытая карточка продавца.
+    С собой несёт текст страницы — из него Risk Control вытаскивает срок
+    снятия лимита, если платформа его назвала.
+    """
+    from ..crm.risk import PlatformRestricted, page_text, match_risk_markers
+
+    text = page_text(driver)
+    marker = match_risk_markers(text, extra_markers)
+    if marker:
+        raise PlatformRestricted(marker=marker, snippet=text, stage=stage)
+
+
+def probe_platform(driver, extra_markers: tuple = (), attempts: int = 3,
+                   pause_seconds: int = 15, on_progress=None) -> Tuple[bool, str]:
+    """Чекает платформу до N перезагрузок, НЕ трогая очередь.
+
+    Правило оператора после ночи 02–03.10.2026 (аккаунт ушёл в антифрод,
+    прогон сожгли 104 продавца): при антибот-челлендже или «подозрительной
+    активности» — до 3 перезагрузок, ни одной отправки и ни одной пометки
+    «не отправлено»; не отпустило — полный стоп. Возвращает (отпустило,
+    последний маркер).
+    """
+    from ..crm.risk import scan_driver
+
+    attempts = max(int(attempts), 1)
+    marker = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            driver.get("https://www.ozon.ru/")
+        except Exception as exc:                         # noqa: BLE001
+            if on_progress:
+                on_progress(f"Проверка {attempt}/{attempts}: страница не открылась "
+                            f"({str(exc)[:80]})")
+            time.sleep(pause_seconds)
+            continue
+        time.sleep(5)
+        marker = scan_driver(driver, extra_markers)
+        if not marker:
+            if on_progress and attempt > 1:
+                on_progress(f"Проверка {attempt}/{attempts}: платформа отпустила — продолжаю")
+            return True, ""
+        if on_progress:
+            on_progress(f"Проверка {attempt}/{attempts}: маркер «{marker}» — "
+                        "перезагрузка без отправки")
+        time.sleep(pause_seconds)
+    return False, marker
+
+
+def probe_or_raise(driver, extra_markers: tuple = (), stage: str = "",
+                   on_progress=None) -> None:
+    """Маркер ограничения → до 3 перезагрузок без отправки; не отпустило — стоп.
+
+    Отличие от raise_if_platform_restricted: одноразовый маркер (моргнувший
+    челлендж) не роняет прогон — сначала чекает probe_platform. Продавец,
+    на котором пойман маркер, НЕ получает «не отправлено»: он остаётся в
+    статусе «в работе» и вернётся в очередь через release_stale.
+    """
+    from ..crm.risk import scan_driver, page_text
+
+    marker = scan_driver(driver, extra_markers)
+    if not marker:
+        return
+    ok, last_marker = probe_platform(driver, extra_markers, on_progress=on_progress)
+    if ok:
+        return
+    raise PlatformRestricted(marker=marker or last_marker,
+                             snippet=page_text(driver), stage=stage)
+
+
 # Когда вкладку отправщика закрывают (вместе с окном Chrome или отдельно),
 # chromedriver отвечает такими ошибками. Это не вина продавца: после
 # переподключения к браузеру его можно отправить без списания попытки.
@@ -210,6 +460,17 @@ class NoChatAvailable(Exception):
     повторах. Такие записи уходят в «пропущен» сразу, чтобы очередь шла
     дальше, а причина остаётся в last_error.
     """
+
+
+# Точные тексты заглушек Ozon для невозможности написать продавцу (скрины
+# оператора от 03.10.2026). Совпадение — скип «личка закрыта» БЕЗ счётчиков
+# и стопов: у этого продавца закрыт чат, у остальных всё работает. Тексты
+# сворачиваются по пробелам: заголовок на странице перенесён на две строки.
+CLOSED_DM_MARKERS = (
+    "этому продавцу пока нельзя написать",
+    "этому продавцу нельзя написать",
+    "чат заблокирован",
+)
 
 
 # --- Работа с браузером ---------------------------------------------------
@@ -271,7 +532,21 @@ class ChatClient:
 
     def is_logged_in(self) -> bool:
         self._focus()
-        return bool(self._find(self.selectors.login_marker))
+        if bool(self._find(self.selectors.login_marker)):
+            return True
+        try:
+            links = self.driver.find_elements("css selector", "a[href*='/my/main'], a[href*='/my/orderlist']")
+            if links:
+                return True
+        except Exception:
+            pass
+        try:
+            cookie_names = {c.get("name") for c in self.driver.get_cookies()}
+            if "__Secure-user-id" in cookie_names or "ozonIdAuthResponseToken" in cookie_names:
+                return True
+        except Exception:
+            pass
+        return False
 
     def open_chat(self, seller_id: str) -> None:
         """Открывает чат с продавцом через его страницу.
@@ -310,23 +585,39 @@ class ChatClient:
                     "нет кнопки «Написать» — личные сообщения закрыты"
                 )
 
-            self.driver.execute_script(
-                "arguments[0].scrollIntoView({block: 'center'});", button)
-            time.sleep(0.5)
+            from ..utils.human_cursor import human_click
+            time.sleep(random.uniform(0.3, 0.6))
             try:
-                button.click()
+                human_click(self.driver, button)
             except Exception:
                 # Кнопку может перекрывать другой элемент — жмём через JS
                 self.driver.execute_script("arguments[0].click();", button)
 
-            # Ждём поле ввода: значит чат действительно открылся
+            # Ждём поле ввода: значит чат действительно открылся.
+            # Раньше тут было 25 секунд × 2 попытки — на продавце с мёртвым
+            # виджетом чата прогон стоял почти минуту. 10 секунд достаточно:
+            # живой чат раскрывается за 2–5 секунд.
             try:
                 self.wait_for(
                     self.selectors.message_input,
-                    timeout=max(self.wait_seconds, 25),
+                    timeout=10,
                 )
                 return
             except TimeoutException:
+                # Заглушки «Этому продавцу (пока) нельзя написать» и «Чат
+                # заблокирован» — личные сообщения закрыты у САМОГО продавца.
+                # Это не блок аккаунта и не сбой виджета: скип без счётчиков,
+                # повторов и стопов (правило оператора от 03.10.2026).
+                # Проверяем с первой же попытки — ждать второй у закрытой
+                # лички смысла нет. Текст на странице перенесён на две строки
+                # («…пока» / «нельзя написать»), поэтому сравниваем со
+                # СВЁРНУТЫМИ пробелами — иначе совпадения не бывает
+                # (проверено на продавце 200503).
+                from ..crm.risk import page_text
+                page = " ".join(page_text(self.driver).split()).lower()
+                hit = next((m for m in CLOSED_DM_MARKERS if m in page), "")
+                if hit:
+                    raise NoChatAvailable(f"личка закрыта: {hit}")
                 if attempt == 2:
                     raise NoChatAvailable(
                         "чат не открылся: поле ввода не появилось"
@@ -339,56 +630,46 @@ class ChatClient:
         Кнопка отправки заблокирована, пока поле пустое, и разблокируется после
         ввода — проверено на живой странице.
         """
+        from ..utils.human_cursor import human_click
         self._focus()
         field = self.wait_for(self.selectors.message_input)
         try:
-            field.click()
+            human_click(self.driver, field)
         except Exception:
             # Поле иногда перекрыто шапкой чата — обычный клик перехватывается.
             # Клик через JS ставит фокус так же, перехват не страшен.
             self.driver.execute_script("arguments[0].click();", field)
-        # ВАЖНО: текст ставим значением через JS, а НЕ send_keys.
-        #
-        # send_keys трактует "\n" как Enter, а Enter в чате Ozon отправляет
-        # сообщение. Из-за этого многострочный текст уходил несколькими
-        # отдельными сообщениями: «строка 1», «строка 2» и так далее. На живом
-        # продавце это подтвердилось — ушло два сообщения вместо одного.
-        #
-        # Значение, выставленное нативным сеттером с событием input, Ozon
-        # принимает (проверено), и сообщение уходит ровно одно, целиком.
+
         self._set_field_value(field, text)
-        time.sleep(0.5)
+        time.sleep(random.uniform(0.5, 1.0))
         button = self.wait_for(self.selectors.send_button)
         try:
-            button.click()
+            human_click(self.driver, button)
         except Exception:
             self.driver.execute_script("arguments[0].click();", button)
 
     def _set_field_value(self, field, text: str) -> None:
-        """Ставит текст в поле ввода одним значением, без нажатий клавиш."""
-        try:
-            self.driver.execute_script(
-                """
-                const el = arguments[0];
-                const proto = el.tagName === 'TEXTAREA'
-                  ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-                const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-                setter.call(el, arguments[1]);
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-                """,
-                field, text,
-            )
-        except Exception:                                    # noqa: BLE001
-            # Запасной путь: построчный ввод с Shift+Enter, чтобы переводы строк
-            # не превращались в отправку
-            from selenium.webdriver.common.keys import Keys
-            field.clear()
-            lines = text.split("\n")
-            for index, line in enumerate(lines):
+        """Вводит текст через нативный send_keys (эмуляция действий человека).
+        
+        Использование JS-сеттера (Object.getOwnPropertyDescriptor().set)
+        спровоцировало блокировку (isTrusted=false). Нативный ввод
+        генерирует реальные события клавиатуры, не отличающиеся от человека.
+        """
+        from selenium.webdriver.common.keys import Keys
+        import random
+        
+        field.clear()
+        lines = text.split("\n")
+        for index, line in enumerate(lines):
+            # Вводим по кускам, чтобы Selenium генерировал реальные нажатия клавиш
+            if line:
                 field.send_keys(line)
-                if index < len(lines) - 1:
-                    field.send_keys(Keys.SHIFT + Keys.ENTER)
+                time.sleep(random.uniform(0.1, 0.3))
+            
+            # Вместо \n (который сразу отправит сообщение), нажимаем Shift+Enter
+            if index < len(lines) - 1:
+                field.send_keys(Keys.SHIFT + Keys.ENTER)
+                time.sleep(random.uniform(0.1, 0.2))
 
     def _clear_field(self, field) -> None:
         """Очищает поле ввода так, чтобы это увидел фронтенд Ozon."""
@@ -515,7 +796,7 @@ def preflight(config: SenderConfig, template, data_dir: Path, store=None,
     else:
         add("stop", True, "Стоп-кран", "нет", blocking=False)
 
-    # Дневной лимит
+    # Дневной лимит: у аккаунта свой счётчик — свои сообщения за сегодня
     sent_today = store.sent_today() if store is not None and hasattr(store, "sent_today") else 0
     left = max(0, config.daily_cap - sent_today)
     add("cap", left > 0, "Дневной лимит",
@@ -552,13 +833,15 @@ def preflight(config: SenderConfig, template, data_dir: Path, store=None,
     }
 
 
-def login_flow(data_dir: Path, timeout_seconds: int = 300, on_progress=None) -> bool:
-    """Открывает Chrome с профилем парсера, чтобы вы вошли в Ozon.
+def login_flow(data_dir: Path, timeout_seconds: int = 300, on_progress=None,
+               account: Optional[SenderAccount] = None) -> bool:
+    """Открывает Chrome с профилем аккаунта, чтобы вы вошли в Ozon.
 
-    Профиль парсера (`~/.ozon_parser_chrome`) отдельный от вашего обычного
-    браузера: сессия из него не переносится. Поэтому вход нужно сделать один
-    раз именно в этом окне — дальше cookies сохранятся и отправка будет
-    работать без входа.
+    Профиль парсера (`~/.ozon_parser_chrome` для main, свой для остальных)
+    отделён от вашего обычного браузера: сессия из него не переносится.
+    Поэтому вход нужно сделать один раз именно в этом окне — дальше cookies
+    сохранятся и отправка будет работать без входа. У каждого аккаунта
+    свой профиль: залогиниться в нескольких = выполнить login для каждого.
 
     Функция ждёт, пока вход действительно произойдёт, и только потом отдаёт
     управление: иначе отправка упала бы на первом же продавце.
@@ -570,7 +853,18 @@ def login_flow(data_dir: Path, timeout_seconds: int = 300, on_progress=None) -> 
         if on_progress:
             on_progress(message)
 
-    manager = SeleniumManager(headless=False)
+    if account is not None:
+        manager = SeleniumManager(
+            headless=False,
+            profile_dir=account.profile_dir(),
+            debug_port=account.debug_port(),
+            proxy=getattr(account, "proxy", ""),
+            account_id=account.id,
+        )
+        say(f"Аккаунт {account.id}: профиль {account.profile_dir()}, "
+            f"порт {account.debug_port()}" + (f", прокси: {account.proxy}" if getattr(account, "proxy", "") else ""))
+    else:
+        manager = SeleniumManager(headless=False)
     driver = manager.create_driver()
     try:
         driver.get("https://www.ozon.ru/")
@@ -596,18 +890,29 @@ def login_flow(data_dir: Path, timeout_seconds: int = 300, on_progress=None) -> 
             pass
 
 
-def check_login_live(data_dir: Path, on_progress=None) -> dict:
+def check_login_live(data_dir: Path, on_progress=None,
+                     account: Optional[SenderAccount] = None) -> dict:
     """Живая проверка входа: открывает браузер и смотрит, узнаёт ли Ozon сессию.
 
     Без браузера вход проверить нельзя, поэтому это отдельная операция, а не
     часть обычной проверки готовности: она открывает окно и занимает время.
+    Проверяется сессия КОНКРЕТНОГО аккаунта: у остальных менеджеров своя.
     """
     from ..utils.selenium_manager import SeleniumManager
 
     result = {"logged_in": False, "error": ""}
     manager = None
     try:
-        manager = SeleniumManager(headless=False)
+        if account is not None:
+            manager = SeleniumManager(
+                headless=False,
+                profile_dir=account.profile_dir(),
+                debug_port=account.debug_port(),
+                proxy=getattr(account, "proxy", ""),
+                account_id=account.id,
+            )
+        else:
+            manager = SeleniumManager(headless=False)
         driver = manager.create_driver()
         driver.get("https://www.ozon.ru/")
         time.sleep(3)
@@ -615,8 +920,9 @@ def check_login_live(data_dir: Path, on_progress=None) -> dict:
         client = ChatClient(driver, selectors, manager=manager)
         result["logged_in"] = bool(client.is_logged_in())
         if not result["logged_in"]:
+            who = f" --account {account.id}" if account is not None else ""
             result["error"] = (
-                "Ozon не узнал сессию. Выполните: python run_outreach.py login"
+                "Ozon не узнал сессию. Выполните: python run_outreach.py login" + who
             )
     except Exception as exc:                                 # noqa: BLE001
         result["error"] = str(exc)[:200]
@@ -631,15 +937,25 @@ def check_login_live(data_dir: Path, on_progress=None) -> dict:
     return result
 
 
-def build_driver(headless: bool = False):
-    """Драйвер с постоянным профилем — в нём живёт ваша сессия Ozon.
+def build_driver(headless: bool = False, account: Optional[SenderAccount] = None):
+    """Драйвер с постоянным профилем — в нём живёт сессия Ozon аккаунта.
 
     Возвращаем и менеджер: через него закрываем только свою вкладку (а не весь
-    Chrome) и переключаемся на неё перед каждой операцией.
+    Chrome) и переключаемся на неё перед каждой операцией. С аккаунтом —
+    свой Chrome: свой профиль (сессия аккаунта) и свой порт отладки.
     """
     from ..utils.selenium_manager import SeleniumManager
 
-    manager = SeleniumManager(headless=headless)
+    if account is not None:
+        manager = SeleniumManager(
+            headless=headless,
+            profile_dir=account.profile_dir(),
+            debug_port=account.debug_port(),
+            proxy=getattr(account, "proxy", ""),
+            account_id=account.id,
+        )
+    else:
+        manager = SeleniumManager(headless=headless)
     return manager, manager.create_driver()
 
 
@@ -672,14 +988,29 @@ def run_queue(
     stop_event=None,
     on_event: Optional[Callable[[dict], None]] = None,
     limit: Optional[int] = None,
+    account: Optional[SenderAccount] = None,
 ) -> dict:
     """Прогоняет очередь с соблюдением ограничителей.
+
+    `template` — либо один `MessageTemplate`, либо `TemplatePool` с несколькими
+    текстами: тогда каждому следующему продавцу уходит тот, что использовался
+    реже остальных, и подряд идущие сообщения не повторяются.
+
+    `account` — аккаунт отправителя (менеджера): свой Chrome-профиль, свой
+    дневной лимит и свой стоп-кран. None — основной аккаунт main. Несколько
+    аккаунтов = несколько процессов, очередь в базе размечает продавцов
+    атомарно, дублей не бывает.
 
     Возвращает сводку: сколько отправлено, сколько неудач, почему остановились.
     Если `once=True` — делает не больше одной отправки и выходит (удобно для
     ручной проверки, что всё настроено верно).
     """
-    report = {"sent": 0, "failed": 0, "skipped": 0, "stopped_reason": "", "dry_run": config.dry_run}
+    report = {"sent": 0, "failed": 0, "skipped": 0, "no_chat": 0, "stopped_reason": "",
+              "dry_run": config.dry_run}
+    # Одна сессия (решение оператора 03.10.2026: мультиаккаунт выведен из
+    # эксплуатации): стоп-кран один глобальный, лимит считается по всем
+    # сообщениям — как до мультиаккаунта. Метка аккаунта в журнале остаётся
+    # (sender_account_id из настроек), чтобы история продавцов не терялась.
     stop_file = data_dir / config.stop_file
     next_allowed_at: Optional[datetime] = None
 
@@ -702,6 +1033,18 @@ def run_queue(
             except Exception:                              # noqa: BLE001
                 pass
 
+    def todays_cap(now: datetime) -> int:
+        """Действующий дневной лимит на сегодня: разгон свежего аккаунта,
+        суточный джиттер и авто-замедление по откликам (effective_daily_cap).
+        Считается на каждом витке: на границе суток лимит меняется сам."""
+        ramp_started = (ramp_start_date(data_dir, now.date())
+                        if config.ramp_days > 0 else None)
+        feedback = (queue.outreach_feedback(days=7)
+                    if config.adaptive_slowdown and hasattr(queue, "outreach_feedback")
+                    else None)
+        return effective_daily_cap(config, now, feedback=feedback,
+                                   ramp_started=ramp_started)
+
     def rest(seconds: int) -> bool:
         """Пауза с проверкой отмены. Возвращает False, если пора выходить.
 
@@ -716,30 +1059,86 @@ def run_queue(
         return not cancelled()
 
     queue.release_stale()
+    # «Чат не открылся» — временный сбой: продавец ничего не получил, и через
+    # час его можно пробовать снова. Без возврата такие продавцы копились в
+    # «ошибках» навсегда, хотя виноват виджет Ozon, а не продавец.
+    if hasattr(queue, "requeue_transient_chat_failures"):
+        requeued = queue.requeue_transient_chat_failures(older_than_minutes=60)
+        if requeued:
+            progress(f"Вернул в очередь {requeued} продавцов после временных ошибок чата")
+
+    # Один шаблон — частный случай пула: дальше код не различает, сколько
+    # текстов в каталоге, и ротация работает всегда.
+    if not isinstance(template, TemplatePool):
+        template = TemplatePool([template])
+
+    def next_message(row) -> Tuple[str, str, str]:
+        """Текст, имя шаблона и experiment_id (если продавец в эксперименте).
+
+        Эксперимент главнее ротации: продавцу, назначенному в вариант, уходит
+        РОВНО назначенный текст — иначе сравнение групп теряет смысл. Вне
+        экспериментов работает обычная раскладка (наименее использованный +
+        A/B-ранжирование по ответам).
+        """
+        experiment = (queue.experiment_for_seller(row["seller_id"])
+                      if hasattr(queue, "experiment_for_seller") else None)
+        if experiment and hasattr(template, "get"):
+            chosen = template.get(experiment["variant"])
+            if chosen is not None and not chosen.is_placeholder():
+                return (chosen.render(dict(row)), chosen.name,
+                        str(experiment["experiment_id"]))
+        usage = queue.template_usage() if hasattr(queue, "template_usage") else {}
+        last = queue.last_template_used() if hasattr(queue, "last_template_used") else ""
+        perf = queue.template_performance() if hasattr(queue, "template_performance") else {}
+        chosen = template.pick(usage, avoid=last, performance=perf or None)
+        return chosen.render(dict(row)), chosen.name, ""
 
     driver = None
     manager = None
     selectors = None
     client = None
-    if not config.dry_run:
-        manager, driver = build_driver(headless=False)
-        selectors = ChatSelectors.load(data_dir / "selectors.json")
-        missing = selectors.missing()
-        if missing:
-            raise RuntimeError(f"Не заполнены селекторы: {', '.join(missing)}")
-        client = ChatClient(driver, selectors, manager=manager)
+    current_seller = ""
+    extra_risk_markers = load_extra_markers(data_dir)
 
-        # Сначала открываем Ozon. Драйвер создаёт НОВУЮ пустую вкладку
-        # (about:blank), и проверка входа на ней всегда давала «сессии нет»,
-        # даже когда сессия на месте — из-за этого отправка не запускалась.
-        client._focus()
-        driver.get("https://www.ozon.ru/")
-        time.sleep(3)
-        if not client.is_logged_in():
-            raise RuntimeError(
-                "В браузере нет залогиненной сессии Ozon. "
-                "Войдите в аккаунт в открывшемся окне и запустите снова."
-            )
+    def trigger_risk(exc: PlatformRestricted) -> None:
+        """Risk Control: стоп-кран файлом + инцидент в базу + событие в UI.
+
+        Дальнейшее — дело оператора: проверить причину в браузере и снять
+        паузу явно (resume). Автопродолжения нет и не предусматривается.
+        """
+        until_at = ""
+        try:
+            from ..crm.risk import parse_resume_time
+            until_at = parse_resume_time(exc.snippet)
+        except Exception:                                  # noqa: BLE001
+            pass
+        stop_file.parent.mkdir(parents=True, exist_ok=True)
+        stop_file.write_text(
+            f"risk {now_fn().isoformat(timespec='seconds')} "
+            f"marker={exc.marker} stage={exc.stage} seller={current_seller} "
+            f"until={until_at or 'неизвестно'}\n",
+            encoding="utf-8",
+        )
+        if hasattr(queue, "record_risk_incident"):
+            try:
+                queue.record_risk_incident(
+                    marker=exc.marker, stage=exc.stage,
+                    seller_id=current_seller,
+                    detail=exc.snippet,
+                    until_at=until_at,
+                )
+            except Exception:                              # noqa: BLE001
+                logger.warning("Не записал инцидент риска в базу", exc_info=True)
+        emit("risk", marker=exc.marker, stage=exc.stage, seller_id=current_seller)
+        progress(
+            f"СТОП — ограничение платформы (маркер «{exc.marker}», "
+            f"этап: {exc.stage or 'неизвестен'}). "
+            "Отправка остановлена, стоп-кран установлен, инцидент записан. "
+            + (f"Платформа разрешит отправку после {until_at}. "
+               "Сторож снимет стоп-кран сам в этот срок."
+               if until_at else
+               "Срок снятия платформа не назвала — дальше только вручную (/resume).")
+        )
 
     def rebuild_browser() -> None:
         """Пересоздаёт подключение, если вкладку отправщика закрыли.
@@ -756,11 +1155,13 @@ def run_queue(
                 manager.close()
             except Exception:                           # noqa: BLE001
                 pass
-        manager, driver = build_driver(headless=False)
+        manager, driver = build_driver(headless=False, account=account)
         client = ChatClient(driver, selectors, manager=manager)
         client._focus()
         driver.get("https://www.ozon.ru/")
         time.sleep(3)
+        probe_or_raise(driver, extra_risk_markers, stage="переподключение",
+                       on_progress=progress)
         if not client.is_logged_in():
             raise RuntimeError(
                 "После переподключения сессия Ozon не найдена — "
@@ -768,15 +1169,47 @@ def run_queue(
             )
 
     try:
+        if not config.dry_run:
+            manager, driver = build_driver(headless=False, account=account)
+            selectors = ChatSelectors.load(data_dir / "selectors.json")
+            missing = selectors.missing()
+            if missing:
+                raise RuntimeError(f"Не заполнены селекторы: {', '.join(missing)}")
+            client = ChatClient(driver, selectors, manager=manager)
+
+            # Метка отправителя попадает в журнал (кто писал) и в защиту
+            # от повторных контактов между разными аккаунтами.
+            if hasattr(queue, "register_sender_account"):
+                queue.register_sender_account(config.sender_account_id)
+
+            # Сначала открываем Ozon. Драйвер создаёт НОВУЮ пустую вкладку
+            # (about:blank), и проверка входа на ней всегда давала «сессии нет»,
+            # даже когда сессия на месте — из-за этого отправка не запускалась.
+            client._focus()
+            driver.get("https://www.ozon.ru/")
+            time.sleep(3)
+            probe_or_raise(driver, extra_risk_markers, stage="проверка входа",
+                           on_progress=progress)
+            if not client.is_logged_in():
+                raise RuntimeError(
+                    "В браузере нет залогиненной сессии Ozon. "
+                    "Войдите в аккаунт в открывшемся окне и запустите снова."
+                )
+
+        consecutive_failures = 0
+        consecutive_no_chat = 0
         while True:
             if cancelled():
-                report["stopped_reason"] = (
-                    "сработал стоп-кран" if kill_switch_active(stop_file) else "остановлено вручную"
-                )
+                if kill_switch_active(stop_file):
+                    report["stopped_reason"] = "сработал стоп-кран"
+                else:
+                    report["stopped_reason"] = "остановлено вручную"
                 progress(report["stopped_reason"])
                 break
 
-            decision = should_send_now(now_fn(), config, queue.sent_today(), next_allowed_at)
+            decision = should_send_now(now_fn(), config, queue.sent_today(),
+                                       next_allowed_at,
+                                       effective_cap=todays_cap(now_fn()))
             if not decision.allowed:
                 if once:
                     report["stopped_reason"] = decision.reason
@@ -802,16 +1235,28 @@ def run_queue(
                     break
                 row = candidates[0]
                 shop = row["shop_name"] or row["seller_id"]
-                message = template.render(dict(row))
+                message, template_name, _experiment_id = next_message(row)
                 progress(f"[предпросмотр] {shop} — кому: {row['sample_product_url']}")
-                progress(f"[предпросмотр] текст:\n{message}")
-                emit("preview", seller_id=row["seller_id"], shop=shop, message=message)
+                progress(f"[предпросмотр] текст ({template_name}):\n{message}")
+                emit("preview", seller_id=row["seller_id"], shop=shop,
+                     message=message, template=template_name)
                 report["stopped_reason"] = "режим предпросмотра"
-                report["preview"] = {"seller_id": row["seller_id"], "shop": shop, "message": message}
+                report["preview"] = {"seller_id": row["seller_id"], "shop": shop,
+                                     "message": message, "template": template_name}
                 break
 
             row = queue.claim_next(order_fresh=config.fresh_first)
             if not row:
+                if config.loop and not once:
+                    # Режим «по кругу»: пустая очередь — не остановка, а пауза.
+                    # Продавцы приходят сбором, интервалы всё равно соблюдаются,
+                    # поэтому проверяем пополнение раз в 5 минут.
+                    progress("Очередь пуста — режим «по кругу»: жду пополнения "
+                             "(проверю через 5 мин)")
+                    emit("waiting", reason="очередь пуста — жду пополнения (по кругу)",
+                         seconds=300)
+                    rest(300)
+                    continue
                 report["stopped_reason"] = "очередь пуста"
                 progress(report["stopped_reason"])
                 break
@@ -824,41 +1269,111 @@ def run_queue(
                 break
 
             seller_id = row["seller_id"]
+            current_seller = seller_id
             shop = row["shop_name"] or seller_id
-            message = template.render(dict(row))
-            emit("sending", seller_id=seller_id, shop=shop)
+            message, template_name, experiment_id = next_message(row)
+
+            # Глобальная защита от дублей между аккаунтами. Статуса продавца
+            # мало: его мог сбросить оператор (requeue). Смотрим в ОБЩУЮ
+            # историю сообщений — писал ли кто угодно этому продавцу.
+            prior = queue.prior_contact(seller_id) if hasattr(queue, "prior_contact") else None
+            if prior is not None:
+                allowed, reason = repeat_contact_allowed(
+                    config.repeat_contact_policy, config.repeat_after_days,
+                    prior["sent_at"], now_fn())
+                if not allowed:
+                    skip_reason = (
+                        f"уже был контакт "
+                        f"({prior['sender_account_id'] or 'аккаунт неизвестен'} "
+                        f"{prior['sent_at'][:10]}): {reason}")
+                    queue.mark_skipped(seller_id, skip_reason)
+                    if hasattr(queue, "log_message"):
+                        queue.log_message(seller_id, message, "skipped", skip_reason,
+                                          template_name=template_name,
+                                          sender_account_id=config.sender_account_id)
+                    report["skipped"] += 1
+                    emit("skipped", seller_id=seller_id, shop=shop, error=skip_reason)
+                    progress(f"Пропущен {shop}: {skip_reason}")
+                    continue
+
+            emit("sending", seller_id=seller_id, shop=shop, template=template_name)
 
             # Попытки браузера для одного продавца: основная + одна после
             # переподключения, если вкладку закрыли. Это отдельно от attempts
             # в базе: потеря окна — не вина продавца, списывать его попытку
             # из-за неё нельзя.
             browser_attempts = 0
+            sent_this_round = False
             while browser_attempts < 2:
                 browser_attempts += 1
                 try:
                     client.open_chat(row["seller_id"])
+                    # Чат открыт — страница продавца уже в браузере: последний
+                    # рубеж, на котором Ozon мог подставить заглушку вместо
+                    # магазина. Дальше печатать текст в неизвестно что нельзя.
+                    # Маркер → 3 перезагрузки без отправки; не отпустило — стоп.
+                    probe_or_raise(
+                        driver, extra_risk_markers, stage=f"открытие чата {seller_id}",
+                        on_progress=progress)
                     client.send(message)
                     if client.confirm_sent():
-                        queue.mark_sent(seller_id, message)
+                        queue.mark_sent(seller_id, message, template_name=template_name,
+                                        sender_account_id=config.sender_account_id,
+                                        experiment_id=experiment_id)
                         report["sent"] += 1
-                        emit("sent", seller_id=seller_id, shop=shop, total=report["sent"])
+                        consecutive_failures = 0
+                        consecutive_no_chat = 0
+                        transient_streak = 0
+                        sent_this_round = True
+                        emit("sent", seller_id=seller_id, shop=shop,
+                             total=report["sent"], template=template_name)
                         break
                     queue.mark_failed(seller_id, "не подтвердилась отправка", retryable=True)
                     if hasattr(queue, "log_message"):
-                        queue.log_message(seller_id, message, "failed", "не подтвердилась отправка")
+                        queue.log_message(seller_id, message, "failed",
+                                          "не подтвердилась отправка",
+                                          template_name=template_name)
                     report["failed"] += 1
+                    consecutive_failures += 1
                     emit("failed", seller_id=seller_id, shop=shop, error="не подтвердилась отправка")
                     break
                 except NoChatAvailable as exc:
-                    # Личка закрыта или чат не открылся: повторами не лечится.
-                    # Уходим к следующему сразу, не сжигая время и попытки.
-                    queue.mark_skipped(seller_id, str(exc))
-                    if hasattr(queue, "log_message"):
-                        queue.log_message(seller_id, message, "skipped", str(exc))
-                    report["skipped"] += 1
-                    progress(f"Пропущен {shop}: {exc}")
-                    emit("skipped", seller_id=seller_id, shop=shop, error=str(exc)[:200])
+                    # Три разных случая под одним исключением:
+                    # * «нет кнопки Написать» и «личка закрыта: этому продавцу
+                    #   пока нельзя написать» — закрытые личные сообщения
+                    #   самого продавца: скип и дальше, без счётчиков и
+                    #   порогов, стопов не бывает;
+                    # * «чат не открылся: поле ввода не появилось» — сбой
+                    #   виджета ИЛИ тихий антифрод: продавец остаётся без
+                    #   пометки об ошибке и возвращается в очередь сам
+                    #   (release_stale); после 3 подряд — чек платформы
+                    #   (3 перезагрузки) и стоп при ограничении.
+                    transient = "чат не открылся" in str(exc)
+                    if transient:
+                        consecutive_no_chat += 1
+                        transient_streak += 1
+                        # БЕЗ пометки «не отправлено» (правило оператора после
+                        # ночи 02–03.10.2026): вино может быть не продавца, а
+                        # ограничения платформы. Продавец остаётся «в работе»
+                        # и через release_stale (30 мин) вернётся в очередь
+                        # сам; ни статуса failed, ни записи в журнале.
+                        report["no_chat"] = report.get("no_chat", 0) + 1
+                        progress(f"Чат не открылся ({shop}) — вернётся в очередь "
+                                 "через 30 мин, без пометки об ошибке")
+                        emit("no_chat", seller_id=seller_id, shop=shop, error=str(exc)[:200])
+                    else:
+                        queue.mark_skipped(seller_id, str(exc))
+                        if hasattr(queue, "log_message"):
+                            queue.log_message(seller_id, message, "skipped", str(exc),
+                                              template_name=template_name)
+                        report["skipped"] += 1
+                        progress(f"Пропущен {shop}: {exc} — вкладка идёт к следующему")
+                        emit("skipped", seller_id=seller_id, shop=shop, error=str(exc)[:200])
                     break
+                except PlatformRestricted:
+                    # Ограничение платформы обрабатывает внешний обработчик:
+                    # остановка всего прогона, а не переход к следующему.
+                    raise
                 except Exception as exc:                   # noqa: BLE001
                     if _browser_lost(exc) and browser_attempts < 2:
                         progress(
@@ -873,16 +1388,86 @@ def run_queue(
                     retryable = int(row["attempts"] or 0) < config.max_attempts
                     queue.mark_failed(seller_id, str(exc), retryable=retryable)
                     if hasattr(queue, "log_message"):
-                        queue.log_message(seller_id, message, "failed", str(exc))
+                        queue.log_message(seller_id, message, "failed", str(exc),
+                                          template_name=template_name)
                     report["failed"] += 1
+                    consecutive_failures += 1
                     emit("failed", seller_id=seller_id, shop=shop, error=str(exc)[:200])
                     break
 
-            next_allowed_at = now_fn() + timedelta(seconds=plan_next_delay(config))
+            # Backoff при серии сбоев: техническая авария не должна долбить
+            # очередь каждые interval минут. Это пауза, а не обход ограничений:
+            # при признаках ограничения платформы сработал бы риск-стоп выше.
+            backoff = backoff_seconds(consecutive_failures,
+                                      config.backoff_base_minutes,
+                                      config.backoff_max_minutes)
+            if backoff:
+                progress(f"Сбоев подряд: {consecutive_failures} — "
+                         f"техническая пауза {backoff // 60} мин")
+            if consecutive_failures >= config.max_consecutive_failures:
+                report["stopped_reason"] = (
+                    f"остановлено: {consecutive_failures} сбоев подряд — "
+                    "посмотрите журнал ошибок, нужен человек")
+                emit("stopped", reason=report["stopped_reason"])
+                progress(report["stopped_reason"])
+                break
+            # Серия «чат не открылся» — так выглядит тихий антифрод: аккаунт
+            # залогинен, но платформа закрыла ему чаты (ночь 02–03.10.2026:
+            # 103 продавца сожжены, потому что предохранитель видел живую
+            # сессию и продолжал). По правилу оператора: 3 перезагрузки без
+            # единой отправки, не отпустило — полный стоп. Продавцы этой серии
+            # помечены retryable-ошибкой и вернутся в очередь через час.
+            if consecutive_no_chat >= 3:
+                progress("3+ подряд чат не открылся — чекаю платформу: "
+                         "3 перезагрузки без отправки")
+                ok, marker = probe_platform(driver, extra_risk_markers,
+                                            on_progress=progress)
+                if not ok:
+                    from ..crm.risk import page_text
+                    raise PlatformRestricted(
+                        marker=marker,
+                        snippet=page_text(driver),
+                        stage="серия чатов не открылась",
+                    )
+                # Маркеров нет — это НЕ ограничение платформы: моргает виджет
+                # или Ozon тормозит (утро 03.10.2026: чаты с проверенными
+                # продавцами открываются, аккаунт жив, а прогон умирал на
+                # каждом витке). Продолжаем с паузой: очередь не страдает
+                # (пометок «не отправлено» нет), а при настоящем ограничении
+                # маркеры появятся на следующей серии и сработает ветка выше.
+                progress("Ограничений нет — чаты моргнули, продолжаю "
+                         "с паузой 10 минут")
+                rest(600)
+                consecutive_no_chat = 0
+
+            # Полная пауза — только после реальной отправки. Если сообщение
+            # НЕ ушло (чат закрыт, сбой виджета, ошибка), очередь не
+            # сдвинулась: короткий перерыв и к следующему. У серии сбоев
+            # чата пауза растёт (30 с → 5 мин потолок): идём до конца, но
+            # не пулемётом по мёртвому виджету. Серийный backoff при этом
+            # сильнее обеих: техническая авария не должна долбить очередь.
+            if sent_this_round:
+                delay = max(plan_next_delay(config), backoff)
+            else:
+                cooldown = min(30 * 2 ** (transient_streak - 2), 300) \
+                    if transient_streak >= 2 else 0
+                delay = max(failed_round_pause_seconds(), cooldown, backoff)
+                wait_txt = (f"{delay} сек" if delay < 60 else f"{delay // 60} мин")
+                progress(f"Сообщение не ушло — пауза {wait_txt} и вкладка "
+                         "идёт к следующему продавцу")
+            next_allowed_at = now_fn() + timedelta(seconds=delay)
 
             if once:
                 report["stopped_reason"] = "режим одной отправки"
                 break
+    except PlatformRestricted as exc:
+        # Risk Control: ограничение платформы останавливает ВЕСЬ прогон —
+        # и с этапа проверки входа, и из середины цикла. Стоп-кран, запись
+        # инцидента в базу и событие в интерфейс делает trigger_risk.
+        trigger_risk(exc)
+        report["stopped_reason"] = f"ограничение платформы: {exc.marker}"
+        report["risk"] = {"marker": exc.marker, "stage": exc.stage,
+                          "seller_id": current_seller}
     finally:
         # Закрываем ТОЛЬКО свою вкладку: Chrome общий, в нём живёт сессия Ozon.
         # Раньше здесь был driver.quit(), который убивал браузер целиком —

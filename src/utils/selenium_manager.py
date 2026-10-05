@@ -41,12 +41,18 @@ def get_proxy() -> str:
         return ""
 
 
-def resolve_proxy_for_chrome() -> str:
+def resolve_proxy_for_chrome(raw_proxy: str = "") -> str:
     """Прокси для Chrome. Если в строке есть логин/пароль — поднимаем локальный
     мост (Chrome не умеет авторизацию в --proxy-server) и отдаём адрес моста."""
-    raw = get_proxy()
+    raw = (raw_proxy or "").strip() or get_proxy()
     if not raw:
         return ""
+    # SOCKS Chrome умеет сам (и DNS через него): HTTP-мост здесь ломал бы
+    # прокси — мост говорит с апстримом на CONNECT, а тот ждёт рукопожатие
+    # SOCKS. Мост нужен только для HTTP-прокси с логином/паролем.
+    if raw.lower().startswith("socks5"):
+        logger.info(f"Прокси для Chrome: {raw} (напрямую, SOCKS)")
+        return raw
     try:
         from .proxy_bridge import start_bridge
         resolved = start_bridge(raw)
@@ -82,17 +88,28 @@ def debug_port_alive(port: int = DEBUG_PORT) -> bool:
 
 
 class SeleniumManager:
-    
-    def __init__(self, headless=True):
+
+    def __init__(self, headless=True, profile_dir=None, debug_port=None, proxy=None, account_id=None):
         self.headless = headless
+        # Профиль и порт отладки задаются на инстанс: у каждого аккаунта
+        # отправителя свой Chrome — свой профиль (свои cookie сессии Ozon) и
+        # свой порт. None — общий браузер парсера из переменных окружения.
+        self.profile_dir = Path(profile_dir).expanduser() if profile_dir else PROFILE_DIR
+        self.debug_port = int(debug_port) if debug_port else DEBUG_PORT
+        self.proxy = (proxy or "").strip()
+        self.account_id = str(account_id or "main").strip()
+        
+        # Стабильный отпечаток: загружается из fingerprint.json или генерируется 1 раз
+        from .fingerprint import get_or_create_fingerprint
+        self.fingerprint = get_or_create_fingerprint(self.profile_dir, account_id=self.account_id)
+
         self.driver: Optional[webdriver.Chrome] = None
         self.wait: Optional[WebDriverWait] = None
         self._chrome_proc: Optional[subprocess.Popen] = None
         self._attached = False
         # Своя вкладка этого воркера. Нужна из-за режима подключения к общему
         # Chrome: все воркеры ходят через один порт отладки, и без отдельной
-        # вкладки они перезаписывают друг другу страницу — один запросил
-        # продавца A, другой тут же открыл B, а первый прочитал чужие данные.
+        # вкладки они перезаписывают друг другу страницу.
         self._tab_handle: Optional[str] = None
     
     def create_driver(self) -> webdriver.Chrome:
@@ -112,76 +129,62 @@ class SeleniumManager:
         return self._create_driver_legacy()
 
     @staticmethod
-    def _apply_stealth(driver) -> None:
+    def _apply_stealth(driver, fp=None) -> None:
         """Дополнительная маскировка через CDP.
 
-        Браузер мы запускаем обычный (без флагов автоматизации), но на сервере
-        под Xvfb у него нет GPU: WebGL отдаёт «SwiftShader», язык и таймзона не
-        российские — по этим признакам антибот и вычисляет бота. Правим их.
+        Скрывает серверную среду под Linux Xvfb/VM, подменяет WebGL (Mesa/SwiftShader)
+        на согласованный GPU, маскирует screen, navigator.webdriver, плагины и таймзону.
         """
+        if fp is None:
+            from .fingerprint import generate_fingerprint_for_account
+            fp = generate_fingerprint_for_account("main")
+
         try:
-            version = str(driver.capabilities.get("browserVersion", "154")).split(".")[0]
-            ua = (f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  f"(KHTML, like Gecko) Chrome/{version}.0.0.0 Safari/537.36")
             driver.execute_cdp_cmd("Network.setUserAgentOverride", {
-                "userAgent": ua,
-                "acceptLanguage": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-                "platform": "Win32",
+                "userAgent": fp.user_agent,
+                "acceptLanguage": ",".join(fp.languages),
+                "platform": fp.platform,
             })
         except Exception as exc:                       # noqa: BLE001
             logger.debug(f"UA-подмена не удалась: {exc}")
 
         for command, params in (
-            ("Emulation.setTimezoneOverride", {"timezoneId": "Europe/Moscow"}),
-            ("Emulation.setLocaleOverride", {"locale": "ru-RU"}),
+            ("Emulation.setTimezoneOverride", {"timezoneId": fp.timezone}),
+            ("Emulation.setLocaleOverride", {"locale": fp.languages[0] if fp.languages else "ru-RU"}),
         ):
             try:
                 driver.execute_cdp_cmd(command, params)
             except Exception as exc:                   # noqa: BLE001
                 logger.debug(f"{command} не удался: {exc}")
 
-        script = """
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
-            Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU','ru','en-US','en']});
-            (function () {
-              const patch = (proto) => {
-                if (!proto) return;
-                const original = proto.getParameter;
-                proto.getParameter = function (param) {
-                  if (param === 37445) return 'Intel Inc.';
-                  if (param === 37446) return 'Intel Iris OpenGL Engine';
-                  return original.apply(this, [param]);
-                };
-              };
-              patch(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
-              patch(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
-            })();
-            window.chrome = window.chrome || {runtime: {}};
-        """
+        script = fp.generate_stealth_script()
         try:
             driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": script})
+            try:
+                driver.execute_script(script)
+            except Exception:
+                pass
         except Exception as exc:                       # noqa: BLE001
             logger.debug(f"JS-маскировка не удалась: {exc}")
 
-        logger.info("Применена маскировка (UA/таймзона/локаль/WebGL)")
+        logger.info(f"Применена стабильная маскировка (аккаунт: {fp.account_id}, GPU: {fp.webgl_renderer}, OS: {fp.platform})")
 
     def _attach_to_normal_chrome(self) -> webdriver.Chrome:
         binary = find_chrome_binary()
         if not binary:
             raise RuntimeError("Chrome не найден в системе")
 
-        if not debug_port_alive(DEBUG_PORT):
-            PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        if not debug_port_alive(self.debug_port):
+            self.profile_dir.mkdir(parents=True, exist_ok=True)
             cmd = [
                 binary,
-                f"--remote-debugging-port={DEBUG_PORT}",
-                f"--user-data-dir={PROFILE_DIR}",
+                f"--remote-debugging-port={self.debug_port}",
+                f"--user-data-dir={self.profile_dir}",
                 "--no-first-run",
                 "--no-default-browser-check",
-                "--window-size=1920,1080",
+                f"--window-size={self.fingerprint.screen_width},{self.fingerprint.screen_height}",
             ]
-            proxy = resolve_proxy_for_chrome()
+            proxy = resolve_proxy_for_chrome(self.proxy)
             if proxy:
                 cmd.append(f"--proxy-server={proxy}")
                 # Антибот сверяет IP с данными WebRTC: без этих флагов Chrome
@@ -201,13 +204,13 @@ class SeleniumManager:
             )
 
             deadline = time.time() + 40
-            while time.time() < deadline and not debug_port_alive(DEBUG_PORT):
+            while time.time() < deadline and not debug_port_alive(self.debug_port):
                 time.sleep(1)
-            if not debug_port_alive(DEBUG_PORT):
+            if not debug_port_alive(self.debug_port):
                 raise RuntimeError("Chrome не открыл порт отладки за 40 секунд")
 
         options = Options()
-        options.add_experimental_option("debuggerAddress", f"127.0.0.1:{DEBUG_PORT}")
+        options.add_experimental_option("debuggerAddress", f"127.0.0.1:{self.debug_port}")
         driver = webdriver.Chrome(options=options)
 
         # Браузер не автоматизированный — stealth и флаги не нужны и только вредят
@@ -216,10 +219,11 @@ class SeleniumManager:
         self.driver = driver
         self.wait = WebDriverWait(driver, 20)
         self._attached = True
-        self._apply_stealth(driver)
+        self._apply_stealth(driver, self.fingerprint)
         self._ensure_usable_page()
         self._open_own_tab()
-        logger.info(f"Подключено к обычному Chrome (обход антибота), вкладка {self._tab_handle}")
+        logger.info(f"Подключено к обычному Chrome на порту {self.debug_port} "
+                    f"(профиль {self.profile_dir}), вкладка {self._tab_handle}")
         return driver
 
     def _open_own_tab(self) -> None:
@@ -297,10 +301,10 @@ class SeleniumManager:
         if self.headless:
             chrome_options.add_argument("--headless")
         
-        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument(f"--window-size={self.fingerprint.screen_width},{self.fingerprint.screen_height}")
 
         # Ozon блокирует IP датацентров: без резидентского прокси будет антибот-челлендж
-        proxy = resolve_proxy_for_chrome()
+        proxy = resolve_proxy_for_chrome(self.proxy)
         if proxy:
             chrome_options.add_argument(f"--proxy-server={proxy}")
         
@@ -309,19 +313,17 @@ class SeleniumManager:
             
 
             stealth(driver,
-                   languages=["ru-RU", "ru"],
+                   languages=self.fingerprint.languages,
                    vendor="Google Inc.",
-                   platform="Win32",
-                   webgl_vendor="Intel Inc.",
-                   renderer="Intel Iris OpenGL Engine",
+                   platform=self.fingerprint.platform,
+                   webgl_vendor=self.fingerprint.webgl_vendor,
+                   renderer=self.fingerprint.webgl_renderer,
                    fix_hairline=True)
+            self._apply_stealth(driver, self.fingerprint)
             
 
             driver.implicitly_wait(20)
             driver.set_page_load_timeout(60)
-            
-
-            driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             
             self.driver = driver
             self.wait = WebDriverWait(driver, 20)

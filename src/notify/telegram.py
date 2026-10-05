@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
+# Cloudflare на workers.dev отсекает дефолтный User-Agent питона
+# («error code: 1010»), поэтому все запросы к Bot API идут с нормальным UA.
+USER_AGENT = "Mozilla/5.0 (compatible; OzonCRM/1.0)"
+
 
 def _api_base() -> str:
     """Базовый адрес Bot API. По умолчанию официальный; если с хоста Telegram
@@ -78,7 +82,8 @@ def send(text: str) -> bool:
         request = urllib.request.Request(
             f"{_api_base()}/bot{token}/sendMessage",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json",
+                     "User-Agent": USER_AGENT},
         )
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status == 200

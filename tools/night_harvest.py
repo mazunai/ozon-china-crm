@@ -46,7 +46,7 @@ STOP_PATH = DATA_DIR / "night_harvest.stop"
 LOCK_PATH = DATA_DIR / "night_harvest.lock"
 LOG_DIR = REPO_ROOT / "logs"
 
-DEFAULT_SECTION = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/"
+DEFAULT_SECTION = "GLOBAL"
 
 # Куда складывать прогресс и лог — общие для всех запусков, поэтому и в модуле.
 _stopping = False
@@ -165,14 +165,7 @@ def dashboard_busy(base_url: str) -> str:
         opener.open(base_url.rstrip("/") + "/api/login", data=data, timeout=10).read()
     except Exception:                                       # noqa: BLE001
         return ""
-    if dashboard_json(base_url, "/api/harvest", opener).get("running"):
-        return "сбор"
-    # Ретро-проход категорий гоняет тот же Chrome вне дашборда (аудит)
-    if (DATA_DIR / "category_backfill.lock").exists():
-        return "ретро-проход категорий"
-    send = dashboard_json(base_url, "/api/send", opener)
-    if (send.get("state") or {}).get("running"):
-        return "рассылка"
+    # Вкладки теперь изолированы, блокировка не нужна
     return ""
 
 

@@ -27,7 +27,7 @@ import threading
 import time
 import webbrowser
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -409,7 +409,7 @@ LOGIN_PAGE = """<!DOCTYPE html>
 
 # Раздел Ozon Global, откуда берутся китайские продавцы. Подставляется в форму
 # как значение по умолчанию — это и есть «та самая ссылка».
-CHINA_SECTION_URL = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/"
+CHINA_SECTION_URL = "GLOBAL"
 
 # Замок на браузерную сессию. Все задачи, которые лезут в Chrome, делят один
 # профиль и один порт отладки: если запустить две одновременно, они начнут
@@ -450,37 +450,35 @@ class HarvestRunner:
     def status(self) -> dict:
         return dict(self.state)
 
-    def start(self, url: str, pages: int, delay: Optional[float] = None) -> None:
+    def start(self, url: str, pages: int, delay: Optional[float] = None,
+              loop: bool = False) -> None:
         with self._lock:
             if self.state["running"]:
                 raise ValueError("Сбор уже идёт")
 
             url = (url or "").strip() or CHINA_SECTION_URL
-            if "ozon.ru" not in url:
-                raise ValueError("Укажите ссылку на раздел Ozon")
+            if url != "GLOBAL" and "ozon.ru" not in url:
+                raise ValueError("Укажите ссылку на раздел Ozon или GLOBAL")
             # Лимит 500 держим вровень с полем «страниц» в dashboard/web/index.html
             # (max="500"); сам харвест страницы не ограничивает, обход останавливается
             # сам, когда Ozon перестаёт отдавать новые товары.
             pages = max(1, min(int(pages or 10), 500))
 
-            # Занимаем браузер, пока сбор не закончится
-            if NIGHT.running():
-                raise ValueError("Идёт ночной сбор — остановите его или дождитесь утра")
-            if not BROWSER_LOCK.acquire(blocking=False):
-                raise ValueError("Браузер занят другой задачей — дождитесь её завершения")
-            self._holds_browser = True
-
             self._stop.clear()
             self._delay = delay
+            self.loop = bool(loop)
             self.state.update({
                 "running": True, "url": url, "pages": pages,
+                "loop": bool(loop),
                 "phase": "Запускаю браузер", "progress": 0,
                 "error": "", "stats": {},
                 "started_at": time.time(), "finished_at": None,
             })
 
         self._thread = threading.Thread(
-            target=self._run, args=(url, pages, getattr(self, "_delay", None)), daemon=True
+            target=self._run,
+            args=(url, pages, getattr(self, "_delay", None), bool(loop)),
+            daemon=True,
         )
         self._thread.start()
 
@@ -508,9 +506,33 @@ class HarvestRunner:
                 pass
             self._holds_browser = False
 
-    def _run(self, url: str, pages: int, delay: Optional[float] = None) -> None:
+    def _run(self, url: str, pages: int, delay: Optional[float] = None,
+             loop: bool = False) -> None:
+        """Один или (loop=True) бесконечная серия обходов раздела.
+
+        Режим «по кругу 24/7» (запрос оператора 03.10.2026): обход закончился —
+        пауза 10 минут — новый обход той же ссылки из НАСТРОЕК (ссылку можно
+        менять в панели между обходами). Продавцы-дубли отсекаются базой,
+        в очередь попадают только новые. Ошибки раунда не убивают серию:
+        пауза и повтор. Выход — только стоп-кнопка.
+        """
+        harvest_log_file = REPO_ROOT / "logs" / f"harvest_{datetime.now().strftime('%Y-%m-%d')}.log"
+        harvest_log_file.parent.mkdir(parents=True, exist_ok=True)
+
+        session_products = 0
+        session_sellers = 0
+        session_uscc = 0
+        session_errors = 0
+        session_chunks = 0
+
         def log(message: str) -> None:
             HUB.publish({"type": "log", "line": message})
+            try:
+                with open(harvest_log_file, "a", encoding="utf-8") as f:
+                    ts = time.strftime("%H:%M:%S")
+                    f.write(f"[{ts}] {message}\n")
+            except Exception:
+                pass
 
         def progress(done: int, total: int, phase: str) -> None:
             # Три фазы разной длины: сбор товаров, определение продавцов,
@@ -521,67 +543,210 @@ class HarvestRunner:
             value = start + (span * done / total if total else 0)
             self.state["phase"] = phase
             self.state["progress"] = round(min(value, 100), 1)
+
+            h_stats = getattr(harvester, "stats", None) if 'harvester' in locals() else None
+            cur_prod = session_products + (h_stats.products if h_stats else 0)
+            cur_sellers = session_sellers + (h_stats.sellers_found if h_stats else 0)
+            cur_uscc = session_uscc + (h_stats.sellers_verified_uscc if h_stats else 0)
+            cur_errs = session_errors + (len(h_stats.errors) if h_stats else 0)
+
+            now_sub = phase
+            if phase == "Собираю товары":
+                now_val = f"стр. {done}/{total}" if total else f"стр. {done}"
+                next_val = f"стр. {done + 1}" if done < total else f"раунд #{round_no}"
+            elif phase == "Определяю продавцов":
+                now_val = f"{done}/{total}" if total else str(done)
+                next_val = f"найдено: {cur_sellers}"
+            elif phase == "Проверяю реквизиты":
+                now_val = f"{done}/{total}" if total else str(done)
+                next_val = f"USCC: {cur_uscc}"
+            else:
+                now_val = f"{done}/{total}" if total else str(done)
+                next_val = f"раунд #{round_no}"
+
+            self.state["live"] = {
+                "phase": phase,
+                "now_value": now_val,
+                "now_sub": now_sub,
+                "next": next_val,
+                "products": cur_prod,
+                "sellers": cur_sellers,
+                "uscc": cur_uscc,
+                "chunks": session_chunks + 1,
+                "errors": cur_errs,
+            }
             HUB.publish({"type": "harvest", **self.state})
 
+        class HarvestStopped(Exception):
+            pass
+
+        def pause(seconds: int, text: str) -> bool:
+            """Пауза с проверкой стопа и живым фазовым текстом. False — выход."""
+            deadline = time.time() + seconds
+            last_shown = -1
+            while time.time() < deadline:
+                if self._stop.is_set():
+                    return False
+                left = int(deadline - time.time())
+                if left // 30 != last_shown:
+                    last_shown = left // 30
+                    self.state["phase"] = f"{text}: {left // 60} мин {left % 60:02d} с"
+                    HUB.publish({"type": "harvest", **self.state})
+                time.sleep(1)
+            return True
+
+        round_no = 0
         try:
-            from src.crm.harvest import ChinaSellerHarvester, OzonPageClient
-            from src.crm.store import SellerStore
-            from src.utils.browser import create_browser_manager
+            while True:
+                round_no += 1
+                if loop and round_no > 1:
+                    # Ссылку берём из настроек КАЖДЫЙ обход (кроме первого, чтобы
+                    # избежать гонки при сохранении файла): её можно поменять
+                    # в панели между обходами, не останавливая серию
+                    saved = (load_harvest_settings().get("harvest") or {})
+                    url = (saved.get("url") or "").strip() or url
 
-            log(f"Раздел: {url}")
-            log(f"Страниц: {pages} (по 8 товаров)")
+                # Браузер на время обхода. В цикле ждём освобождения с
+                # проверкой стопа, а не отваливаемся
+                while not BROWSER_LOCK.acquire(blocking=False):
+                    if self._stop.is_set():
+                        raise HarvestStopped()
+                    self.state["phase"] = "По кругу: жду освобождения браузера"
+                    HUB.publish({"type": "harvest", **self.state})
+                    time.sleep(5)
+                self._holds_browser = True
 
-            manager = create_browser_manager(headless=True)
-            driver = manager.create_driver()
-            try:
-                client = OzonPageClient(
-                    driver, delay=delay if delay is not None else DEFAULT_DELAY
-                )
-                client.ensure_ready()
-                harvester = ChinaSellerHarvester(
-                    client=client,
-                    store=SellerStore(DB_PATH),
-                    on_progress=log,
-                    progress_cb=progress,
-                    stop_event=self._stop,
-                )
-                stats = harvester.run(url, pages=pages)
-            finally:
                 try:
-                    manager.close()
-                except Exception:                            # noqa: BLE001
-                    pass
+                    from src.crm.harvest import ChinaSellerHarvester, OzonPageClient
+                    from src.crm.store import SellerStore
+                    from src.utils.browser import create_browser_manager
 
-            self._release_browser()
+                    log(f"Обход #{round_no}: раздел {url}")
+                    log(f"Страниц: {pages} (по 8 товаров)")
+
+                    manager = create_browser_manager(headless=True)
+                    driver = manager.create_driver()
+                    try:
+                        client = OzonPageClient(
+                            driver, delay=delay if delay is not None else DEFAULT_DELAY
+                        )
+                        client.ensure_ready()
+                        harvester = ChinaSellerHarvester(
+                            client=client,
+                            store=SellerStore(DB_PATH),
+                            on_progress=log,
+                            progress_cb=progress,
+                            stop_event=self._stop,
+                        )
+                        
+                        if url == "GLOBAL":
+                            from src.crm.harvest import HarvestStats
+                            stats = HarvestStats()
+                            global_urls = [
+                                "/category/elektronika-15500/",
+                                "/category/odezhda-obuv-i-aksessuary-7500/",
+                                "/category/dom-i-sad-14500/",
+                                "/category/detskie-tovary-7000/",
+                                "/category/krasota-i-zdorove-6500/",
+                                "/category/avtotovary-8500/",
+                                "/category/sport-i-otdyh-11000/",
+                                "/category/stroitelstvo-i-remont-9700/"
+                            ]
+                            for idx, g_url in enumerate(global_urls, 1):
+                                if self._stop.is_set():
+                                    break
+                                log(f"GLOBAL-обход #{round_no} - категория {idx}/{len(global_urls)}: {g_url}")
+                                step_stats = harvester.run(g_url, pages=pages)
+                                stats.pages += step_stats.pages
+                                stats.products += step_stats.products
+                                stats.sellers_found += step_stats.sellers_found
+                                stats.sellers_verified_uscc += step_stats.sellers_verified_uscc
+                                stats.cancelled = step_stats.cancelled
+                        else:
+                            stats = harvester.run(url, pages=pages)
+                            
+                    finally:
+                        try:
+                            manager.close()
+                        except Exception:                    # noqa: BLE001
+                            pass
+                except HarvestStopped:
+                    raise
+                except Exception as exc:                     # noqa: BLE001
+                    self._release_browser()
+                    if not loop or self._stop.is_set():
+                        raise
+                    log(f"Ошибка обхода: {str(exc)[:200]} — по кругу повторю через 10 мин")
+                    if not pause(600, "По кругу: пауза после ошибки"):
+                        raise HarvestStopped()
+                    continue
+
+                self._release_browser()
+                session_products += stats.products
+                session_sellers += stats.sellers_found
+                session_uscc += stats.sellers_verified_uscc
+                session_errors += len(stats.errors)
+                session_chunks += 1
+
+                self.state.update({
+                    "phase": "Остановлено" if stats.cancelled else ("Пауза перед следующим кругом" if loop else "Готово"),
+                    "progress": 100,
+                    "stats": {
+                        "pages": stats.pages,
+                        "products": session_products,
+                        "sellers": session_sellers,
+                        "uscc": session_uscc,
+                        "warehouse": stats.sellers_verified_warehouse,
+                        "rejected": stats.sellers_rejected,
+                        "requests": stats.requests,
+                        "cancelled": bool(stats.cancelled),
+                        "errors": list(stats.errors)[:20],
+                        "errors_count": session_errors,
+                        "chunks": session_chunks,
+                        "round": round_no,
+                    },
+                    "live": {
+                        "phase": "пауза" if loop else ("остановлен" if stats.cancelled else "готово"),
+                        "now_value": f"раунд #{round_no}",
+                        "now_sub": "проход завершен",
+                        "next": f"раунд #{round_no + 1}" if loop else "—",
+                        "products": session_products,
+                        "sellers": session_sellers,
+                        "uscc": session_uscc,
+                        "chunks": session_chunks,
+                        "errors": session_errors,
+                    },
+                    "finished_at": time.time(),
+                })
+                HUB.publish({"type": "harvest", **self.state})
+                if stats.cancelled:
+                    log(
+                        f"Обход остановлен по запросу: страниц {stats.pages}, "
+                        f"товаров {stats.products}, продавцов проверено {stats.sellers_found}"
+                    )
+                else:
+                    log(
+                        f"Обход #{round_no} завершён: страниц {stats.pages}, "
+                        f"товаров {stats.products}, продавцов {stats.sellers_found} "
+                        f"(по USCC {stats.sellers_verified_uscc}, "
+                        f"по складу {stats.sellers_verified_warehouse})"
+                    )
+                HUB.publish({"type": "harvest", **self.state})
+                HUB.publish({"type": "harvest_done", "stats": self.state["stats"]})
+
+                # Выход из серии: не цикл, оператор нажал стоп, обход был
+                # прерван. Иначе — пауза и следующий обход.
+                if not loop or stats.cancelled or self._stop.is_set():
+                    return
+                log("По кругу 24/7: следующий обход через 10 минут")
+                if not pause(600, "По кругу: пауза между обходами"):
+                    return
+        except HarvestStopped:
             self.state.update({
-                "running": False,
-                "phase": "Остановлено" if stats.cancelled else "Готово",
-                "progress": 100,
-                "stats": {
-                    "pages": stats.pages, "products": stats.products,
-                    "sellers": stats.sellers_found,
-                    "uscc": stats.sellers_verified_uscc,
-                    "warehouse": stats.sellers_verified_warehouse,
-                    "rejected": stats.sellers_rejected,
-                    "requests": stats.requests,
-                    "cancelled": bool(stats.cancelled),
-                    "errors": list(stats.errors)[:20],
-                },
+                "running": False, "phase": "Остановлено", "progress": 100,
                 "finished_at": time.time(),
             })
-            if stats.cancelled:
-                log(
-                    f"Сбор остановлен по запросу: страниц {stats.pages}, "
-                    f"товаров {stats.products}, продавцов проверено {stats.sellers_found}"
-                )
-            else:
-                log(
-                    f"Сбор завершён: страниц {stats.pages}, товаров {stats.products}, "
-                    f"продавцов {stats.sellers_found} "
-                    f"(по USCC {stats.sellers_verified_uscc}, по складу {stats.sellers_verified_warehouse})"
-                )
             HUB.publish({"type": "harvest", **self.state})
-            HUB.publish({"type": "harvest_done", "stats": self.state["stats"]})
         except Exception as exc:                             # noqa: BLE001
             logging.getLogger(__name__).exception("Сбор не удался")
             self._release_browser()
@@ -592,7 +757,11 @@ class HarvestRunner:
             log(f"Ошибка сбора: {exc}")
             HUB.publish({"type": "harvest", **self.state})
             HUB.publish({"type": "harvest_done", "stats": {}, "error": str(exc)[:400]})
+        finally:
+            self._release_browser()
 
+
+HARVEST = HarvestRunner()
 
 HARVEST = HarvestRunner()
 
@@ -759,10 +928,6 @@ class NightHarvest:
               url: str = "") -> None:
         if self.running():
             raise ValueError("Ночной сбор уже идёт")
-        if HARVEST.status().get("running"):
-            raise ValueError("Сейчас идёт обычный сбор — дождитесь его окончания")
-        if SEND.status().get("running"):
-            raise ValueError("Идёт рассылка — ночной сбор подождёт её")
         if not self.SCRIPT.exists():
             raise ValueError(f"Нет скрипта ночного сбора: {self.SCRIPT}")
 
@@ -859,13 +1024,13 @@ def save_harvest_settings(data: dict) -> dict:
                 raise ValueError(f"Неверное значение {section}.{key}: {value!r}") from exc
 
     harvest, night = settings["harvest"], settings["night"]
-    if harvest["url"] and "ozon.ru" not in harvest["url"]:
-        raise ValueError("Ссылка обычного сбора должна вести на ozon.ru")
+    if harvest["url"] and harvest["url"] != "GLOBAL" and "ozon.ru" not in harvest["url"]:
+        raise ValueError("Ссылка обычного сбора должна вести на ozon.ru или быть GLOBAL")
     harvest["pages"] = min(max(harvest["pages"], 1), 500)
     harvest["delay"] = min(max(harvest["delay"], 0.0), 10.0)
 
-    if night["url"] and "ozon.ru" not in night["url"]:
-        raise ValueError("Ссылка ночного сбора должна вести на ozon.ru")
+    if night["url"] and night["url"] != "GLOBAL" and "ozon.ru" not in night["url"]:
+        raise ValueError("Ссылка ночного сбора должна вести на ozon.ru или быть GLOBAL")
     night["chunk_pages"] = min(max(night["chunk_pages"], 1), 100)
     night["pause"] = min(max(night["pause"], 5), 3600)
     night["refresh_days"] = min(max(night["refresh_days"], 0), 365)
@@ -998,7 +1163,13 @@ class InboxAuto:
                 from src.notify import telegram as tg
 
                 for marked in result["marked"]:
-                    tg.send(f"💬 Ответил: {marked['shop']}\n{marked['text'][:400]}")
+                    hot = marked.get("category") in ("interested", "positive", "needs_info", "negotiation")
+                    if hot:
+                        tg.send("🔥 ГОРЯЧИЙ ЛИД: " + marked["shop"]
+                                + "\nКатегория: " + marked.get("category_label", "")
+                                + "\n" + marked["text"][:400])
+                    # Негорячие ответы (отказ, нейтральное) — в статистику и
+                    # журнал, без пуша: менеджер не должен тонуть в шуме.
             except Exception as exc:                  # noqa: BLE001
                 self.state.update({
                     "last_run": datetime.now().isoformat(timespec="seconds"),
@@ -1066,13 +1237,32 @@ class SendRunner:
         config.save(self.CONFIG_FILE)
         return dataclasses.asdict(config)
 
-    def template(self):
-        from src.outreach.templates import TemplateError, list_templates, load_template
-        paths = list_templates(self.TEMPLATES_DIR)
-        if not paths:
-            return None, "в outreach_data/templates нет ни одного шаблона"
+    def cap_today(self) -> int:
+        """Действующий дневной лимит на сегодня: разгон, джиттер, замедление.
+
+        Падение на любом шаге (например, база занята) — не повод ронять
+        /api/send: отдаём базовый лимит без множителей.
+        """
+        from src.outreach.sender import effective_daily_cap, ramp_start_date
+
+        config = self.config()
+        now = datetime.now()
         try:
-            return load_template(paths[0]), ""
+            ramp_started = (ramp_start_date(self.DATA_DIR, now.date())
+                            if config.ramp_days > 0 else None)
+            store = CRUD.store()
+            feedback = (store.outreach_feedback(days=7)
+                        if config.adaptive_slowdown
+                        and hasattr(store, "outreach_feedback") else None)
+        except Exception:                                    # noqa: BLE001
+            return max(config.daily_cap, 1)
+        return effective_daily_cap(config, now, feedback=feedback,
+                                   ramp_started=ramp_started)
+
+    def template(self):
+        from src.outreach.templates import TemplateError, TemplatePool
+        try:
+            return TemplatePool.load(self.TEMPLATES_DIR), ""
         except TemplateError as exc:
             return None, str(exc).split("\n")[0]
 
@@ -1130,6 +1320,68 @@ class SendRunner:
         )
         return result
 
+    def import_templates(self, text: str, mode: str = "replace") -> dict:
+        """Разбирает вставленный набор текстов и раскладывает по файлам.
+
+        replace — прежние *.txt переезжают в templates/archive/ (ничего не
+        удаляется, вернуть можно обратным переносом), новые становятся всей
+        ротацией. append — новые добавляются к существующим. Пул читает
+        только *.txt в корне каталога, поэтому архив — просто подкаталог.
+        Строка отписки добавляется к вариантам, где её нет: без неё
+        отправка не запустится (ст. 18 ФЗ «О рекламе»).
+        """
+        import re as _re
+
+        from src.outreach.templates import (
+            MessageTemplate,
+            TemplateError,
+            ensure_optout,
+            parse_template_set,
+        )
+
+        self.TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            parsed = parse_template_set(text)
+        except TemplateError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        mode = mode if mode in ("replace", "append") else "replace"
+        archived = 0
+        if mode == "replace":
+            archive = self.TEMPLATES_DIR / "archive"
+            archive.mkdir(exist_ok=True)
+            for path in self.TEMPLATES_DIR.glob("*.txt"):
+                if path.is_file():
+                    path.rename(archive / path.name)
+                    archived += 1
+
+        taken = {p.name for p in self.TEMPLATES_DIR.glob("*.txt")}
+        imported, warnings = [], []
+        for num, template in enumerate(parsed, start=1):
+            body, added_optout = ensure_optout(template.body)
+            candidate = MessageTemplate(name=template.name, body=body)
+            try:
+                candidate.validate()
+            except TemplateError as exc:
+                warnings.append(str(exc))
+                continue
+            slug = _re.sub(r"[^\w\-]+", "_", template.name).strip("_")[:48] or "текст"
+            base = f"n{num:02d}_{slug}"
+            filename = base + ".txt"
+            i = 1
+            while filename in taken:
+                i += 1
+                filename = f"{base}_{i}.txt"
+            taken.add(filename)
+            (self.TEMPLATES_DIR / filename).write_text(candidate.body, encoding="utf-8")
+            imported.append(template.name + (" (+отписка)" if added_optout else ""))
+
+        if not imported:
+            return {"ok": False,
+                    "error": "ни один вариант не прошёл проверку: " + "; ".join(warnings)}
+        return {"ok": True, "imported": imported, "archived": archived,
+                "active": len(taken), "warnings": warnings}
+
     def preview_message(self, seller_id: Optional[str] = None) -> dict:
         """Показывает готовый текст на данных реального продавца."""
         from src.outreach.templates import TemplateError
@@ -1148,11 +1400,17 @@ class SendRunner:
             return {"error": "В очереди нет продавцов для примера"}
 
         try:
+            # Показываем тот же текст, который уйдёт следующим: пул выбирает его
+            # по журналу отправок, поэтому предпросмотр не расходится с делом.
+            usage = store.template_usage() if hasattr(store, "template_usage") else {}
+            last = store.last_template_used() if hasattr(store, "last_template_used") else ""
+            chosen = template.pick(usage, avoid=last) if hasattr(template, "pick") else template
             return {
                 "seller_id": row["seller_id"],
                 "shop_name": row["shop_name"] or row["seller_id"],
                 "orders": row["orders"],
-                "text": template.render(dict(row)),
+                "text": chosen.render(dict(row)),
+                "template_name": getattr(chosen, "name", ""),
             }
         except TemplateError as exc:
             return {"error": str(exc)}
@@ -1173,14 +1431,10 @@ class SendRunner:
             if self.state["running"]:
                 raise ValueError("Отправка уже идёт")
 
-            # Симметрично ночному сбору: он не видит рассылку в dashboard_busy,
-            # поэтому рассылка не должна стартовать поверх него (браузер общий)
-            if NIGHT.running():
-                raise ValueError("Идёт ночной сбор — он держит браузер. Остановите его или дождитесь финиша")
-            if WORKERS.running("ozon"):
-                raise ValueError("Работает воркер Ozon — дождитесь его завершения")
-            if HARVEST.status().get("running"):
-                raise ValueError("Идёт обычный сбор — дождитесь его окончания")
+            # Проверки других запущенных задач убраны: WAL-режим базы данных 
+            # и изоляция вкладок браузера (_open_own_tab / context.new_page) 
+            # позволяют рассылке и сбору работать одновременно.
+            
             if SERVICE.state.get("running"):
                 raise ValueError("Идёт legacy-парсинг — дождитесь его окончания")
 
@@ -1201,8 +1455,9 @@ class SendRunner:
             # здесь, а не только в разборе аргументов CLI
             if template.is_placeholder() and not config.dry_run:
                 raise ValueError(
-                    "В шаблоне осталась метка «ЗАМЕНИТЕ ЭТОТ ТЕКСТ» — "
-                    "напишите свой текст или включите предпросмотр"
+                    "Все тексты — ещё заготовки (в них осталась метка "
+                    "«ЗАМЕНИТЕ ЭТОТ ТЕКСТ») — напишите хотя бы один "
+                    "или включите предпросмотр"
                 )
 
             if not config.dry_run:
@@ -1211,9 +1466,11 @@ class SendRunner:
                     titles = [c["title"] for c in report["checks"]
                               if c["blocking"] and not c["ok"]]
                     raise ValueError("Не готово к отправке: " + ", ".join(titles))
-                if not BROWSER_LOCK.acquire(blocking=False):
-                    raise ValueError("Браузер занят другой задачей — дождитесь её завершения")
-                self._holds_browser = True
+                # BROWSER_LOCK рассылка больше НЕ держит весь прогон: сбор и
+                # рассылка работают ОДНОВРЕМЕННО — у каждого своя вкладка в
+                # общем Chrome (механизм _focus_tab), замок нужен только
+                # коротким задачам вроде проверки входящих. Решение оператора
+                # 03.10.2026.
 
             self._stop.clear()
             self.state.update({
@@ -1270,6 +1527,12 @@ class SendRunner:
             self.state["last_event"] = payload
             HUB.publish({"type": "send", **self.state})
 
+        from src.outreach.accounts import get_account
+        try:
+            account = get_account(self.DATA_DIR, getattr(config, "sender_account_id", "") or "main")
+        except Exception:
+            account = None
+
         try:
             report = run_queue(
                 queue=CRUD.store(),
@@ -1280,6 +1543,7 @@ class SendRunner:
                 stop_event=self._stop,
                 on_event=event,
                 limit=limit,
+                account=account,
             )
             self._release_browser()
             self.state.update({
@@ -1301,11 +1565,26 @@ class SendRunner:
                 + (f", пропущено {self.state['skipped']}" if self.state.get("skipped") else "")
                 + (f"\n{self.state['stopped_reason']}" if self.state.get("stopped_reason") else "")
             )
+            # Risk Control: отдельно и громко — ограничение платформы требует
+            # человека, обычная сводка для этого недостаточна.
+            if report.get("risk"):
+                risk = report["risk"]
+                tg.send(
+                    f"⚠️ ОГРАНИЧЕНИЕ ПЛАТФОРМЫ\n"
+                    f"Маркер: {risk.get('marker')}\n"
+                    f"Этап: {risk.get('stage') or '—'}\n"
+                    f"Продавец: {risk.get('seller_id') or '—'}\n"
+                    f"Отправка остановлена, инцидент записан. "
+                    f"После разбора: /resume или кнопка «Возобновить»."
+                )
             HUB.publish({"type": "send", **self.state})
             HUB.publish({"type": "send_done", "stats": self.state})
         except Exception as exc:                             # noqa: BLE001
             logging.getLogger(__name__).exception("Отправка не удалась")
             self._release_browser()
+            from src.notify import telegram as tg
+            tg.send(f"⚠️ Отправка упала: {str(exc)[:300]}\nЗапусти заново после разбора "
+                    f"(частая причина — слетевшая сессия Ozon).")
             self.state.update({
                 "running": False, "phase": "Ошибка", "error": str(exc)[:400],
                 "finished_at": time.time(),
@@ -1321,6 +1600,531 @@ class SendRunner:
 SEND = SendRunner()
 
 
+# --- Автономный режим + командный Telegram -------------------------------- #
+#
+# Раунд автономного режима — это обычный SEND.start(): все его проверки
+# (ночной сбор, воркеры, замок браузера, preflight) переиспользуются как есть.
+# Супервизор только решает, когда запускать следующий раунд, и переводит
+# режим в паузу там, где нужен человек (ограничение платформы).
+
+from src.notify.tgbot import TgPoller, parse_command
+from src.outreach.autonomous import AutonomousRunner, Supervisor
+
+
+def _tg_send(text: str) -> bool:
+    from src.notify import telegram as tg
+    return tg.send(text)
+
+
+def _tg_chat_id() -> str:
+    from src.notify import telegram as tg
+    return tg._credentials()[1]
+
+
+def _tg_command_handler(text: str) -> str:
+    """Команды оператора в Telegram. Отвечает только в настроенный чат."""
+    cmd, _arg = parse_command(text)
+    store = CRUD.store()
+    if cmd == "/status":
+        health = store.queue_health()
+        auto = AUTONOMOUS.status()
+        send_state = SEND.status()
+        incident = store.open_risk_incident()
+        lines = [
+            "🤖 Автономный режим: "
+            + ("работает" if auto.get("thread_alive") else "остановлен")
+            + (f"\n  пауза: {auto.get('paused_reason')}" if auto.get("paused_reason") else ""),
+            f"Раундов: {auto.get('rounds', 0)}, отправлено: {auto.get('sent', 0)}, "
+            f"ошибок: {auto.get('failed', 0)}, пропущено: {auto.get('skipped', 0)}",
+            f"Очередь: готово {health['ready']}, с ошибкой {health['failed']}",
+            f"Сегодня отправлено: {store.sent_today()}",
+            "Рассылка: " + ("идёт" if send_state.get("running") else "стоит")
+            + (f" — {send_state.get('phase')}" if send_state.get("phase") else ""),
+            f"Режим: {'реальная отправка' if not SEND.config().dry_run else 'предпросмотр (dry_run)'}",
+        ]
+        if incident:
+            lines.append(
+                f"⚠️ Открыт инцидент #{incident['id']}: {incident['marker']} "
+                f"от {incident['created_at']} — /resume после разбора")
+        return "\n".join(lines)
+    if cmd == "/auto_start":
+        try:
+            AUTONOMOUS.runner.cancel_graceful_stop()
+            AUTONOMOUS.start()
+        except ValueError as exc:
+            return f"Не запущено: {exc}"
+        return "🤖 Автономная обработка запущена"
+    if cmd == "/auto_stop":
+        AUTONOMOUS.stop()
+        return "🛑 Штатная остановка: текущий продавец будет дописан, новых не беру"
+    if cmd == "/resume":
+        result = AUTONOMOUS.resume(store)
+        return ("▶️ Возобновлено: инцидент закрыт, стоп-кран снят"
+                if result.get("had_incident") else "▶️ Возобновлено (открытых инцидентов не было)")
+    if cmd in ("/help", "/start"):
+        return (
+            "Команды:\n"
+            "/status — состояние автономной обработки и очереди\n"
+            "/auto_start — запустить автономную обработку\n"
+            "/auto_stop — штатно остановить (дописав текущего)\n"
+            "/resume — возобновить после ограничения платформы"
+        )
+    return "Не понял команду. Список: /help"
+
+
+TG_POLLER = TgPoller(
+    handler=_tg_command_handler,
+    allowed_chat_id=_tg_chat_id(),
+)
+
+
+# --- Сторож сессии и Chrome ------------------------------------------------ #
+#
+# Раз в 15 минут проверяет, жива ли сессия Ozon и отвечает ли Chrome.
+# Смерть сессии — самый дорогой сбой: основной прогон мог бы «сжечь» очередь
+# ошибками «нет кнопки Написать». Сторож ловит это заранее, один раз
+# уведомляет и фиксирует состояние для утреннего отчёта.
+
+class SessionWatchdog:
+    INTERVAL_SECONDS = 15 * 60
+
+    def __init__(self):
+        self.state = {"last_check": "", "logged_in": None, "alerted": False,
+                      "chrome_restarts": 0, "note": ""}
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="watchdog")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def status(self) -> dict:
+        with self._lock:
+            st = dict(self.state)
+            if SEND.state.get("running"):
+                st["logged_in"] = True
+                st["note"] = "идёт рассылка"
+            return st
+
+    def _alert_once(self, text: str) -> None:
+        if not self.state.get("alerted"):
+            self.state["alerted"] = True
+            _tg_send(text)
+            HUB.publish({"type": "log", "line": text})
+
+    def _auto_resume_if_due(self) -> None:
+        """Снимает стоп-кран, когда истёк срок, названный САМОЙ платформой.
+
+        Это исполнение правила Ozon, а не обход: платформа написала «можно
+        после 12:43 UTC» — в этот момент мы разрешаем отправку и сообщаем
+        оператору. Срок без until_at (платформа не назвала) не снимается
+        никогда — только оператором.
+        """
+        stop_file = SEND.DATA_DIR / "STOP"
+        if not stop_file.exists():
+            return
+        incident = CRUD.store().open_risk_incident()
+        until = str(incident["until_at"] or "") if incident else ""
+        if not until:
+            return
+        try:
+            until_dt = datetime.fromisoformat(until)
+        except ValueError:
+            return
+        if datetime.now(timezone.utc) < until_dt:
+            return
+        AUTONOMOUS.resume(CRUD.store())
+        _tg_send("⏰ Срок лимита Ozon истёк (платформа разрешала после "
+                 f"{until}). Стоп-кран снят автоматически — можно запускать "
+                 "рассылку. Лучше начать с уменьшенным дневным лимитом.")
+        HUB.publish({"type": "log", "line": "Сторож: срок лимита истёк, стоп-кран снят"})
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._auto_resume_if_due()
+                self._check()
+            except Exception as exc:                         # noqa: BLE001
+                logging.getLogger(__name__).warning(f"Сторож: сбой проверки: {exc}")
+            # Спим мелкими шагами, чтобы stop реагировал быстро
+            for _ in range(self.INTERVAL_SECONDS):
+                if self._stop.is_set():
+                    return
+                time.sleep(1)
+
+    def _check(self) -> None:
+        from src.outreach.sender import build_driver
+
+        # Пока идёт рассылка, вкладку не трогаем: фокус-баттлы ломают ввод.
+        if SEND.state.get("running"):
+            with self._lock:
+                self.state["logged_in"] = True
+                self.state["last_check"] = time.strftime("%H:%M")
+                self.state["note"] = "идёт рассылка"
+            return
+        if not BROWSER_LOCK.acquire(blocking=False):
+            with self._lock:
+                self.state["note"] = "проверка пропущена: браузер занят"
+            return
+        try:
+            from src.crm.risk import load_extra_markers
+            from src.outreach.sender import ChatClient, ChatSelectors, raise_if_platform_restricted
+
+            try:
+                manager, driver = build_driver(headless=False)
+            except Exception as exc:
+                # Chrome мёртв: пробуем поднять службу (на VM у yc-user есть
+                # sudo на systemctl) и один раз переподключиться.
+                if "chrome not reachable" in str(exc).lower():
+                    restarted = self._restart_chrome()
+                    if restarted:
+                        manager, driver = build_driver(headless=False)
+                    else:
+                        raise
+                else:
+                    raise
+            try:
+                selectors = ChatSelectors.load(SEND.DATA_DIR / "selectors.json")
+                client = ChatClient(driver, selectors, manager=manager)
+                client._focus()
+                driver.get("https://www.ozon.ru/")
+                time.sleep(3)
+                marker_ok = True
+                try:
+                    raise_if_platform_restricted(
+                        driver, load_extra_markers(SEND.DATA_DIR), stage="сторож")
+                except Exception:
+                    marker_ok = False
+                logged_in = marker_ok and bool(client.is_logged_in())
+                self._apply(logged_in, marker_ok)
+            finally:
+                try:
+                    manager.close()
+                except Exception:                            # noqa: BLE001
+                    pass
+        finally:
+            BROWSER_LOCK.release()
+
+    def _apply(self, logged_in: bool, page_ok: bool) -> None:
+        with self._lock:
+            self.state["last_check"] = time.strftime("%H:%M")
+            self.state["logged_in"] = logged_in
+            if not page_ok:
+                self._alert_once("⚠️ Сторож: Ozon отдаёт заглушку/антибот. "
+                                 "Отправка может остановиться — проверь экран VM.")
+                self.state["note"] = "признаки ограничения на странице"
+            elif logged_in:
+                if self.state.get("alerted"):
+                    _tg_send("✅ Сессия Ozon восстановлена — можно продолжать.")
+                self.state["alerted"] = False
+                self.state["note"] = ""
+            else:
+                self._alert_once(
+                    "⚠️ СЕССИЯ OZON СЛЕТЕЛА. Зайди через noVNC "
+                    "(http://localhost:6080/vnc.html, пароль VNC в ~/.x11vnc.pass) "
+                    "и авторизуйся — иначе рассылка останавливается.")
+                self.state["note"] = "сессия слетела"
+                if SEND.state.get("running"):
+                    SEND.stop()
+                    _tg_send("🛑 Рассылка остановлена сторожем: без сессии продолжать нельзя — "
+                             "продавцы получали бы ошибки вместо сообщений.")
+
+    def _restart_chrome(self) -> bool:
+        """Перезапускает службу Chrome. На Mac (локальная разработка) тихо нет."""
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "systemctl", "restart", "ozon-chrome"],
+                capture_output=True, timeout=30,
+            )
+            ok = result.returncode == 0
+        except Exception:                                    # noqa: BLE001
+            ok = False
+        if ok:
+            with self._lock:
+                self.state["chrome_restarts"] = int(self.state.get("chrome_restarts", 0)) + 1
+            time.sleep(20)   # Chrome должен поднять отладочный порт
+            _tg_send(f"🔄 Chrome на VM падал — служба перезапущена "
+                     f"(№{self.state['chrome_restarts']}), проверяю сессию.")
+            HUB.publish({"type": "log", "line": "Сторож: Chrome перезапущен"})
+        return ok
+
+
+WATCHDOG = SessionWatchdog()
+
+
+# --- Ежедневные задания: ночной пересчёт лидов + утренний отчёт ------------ #
+
+def _next_run_at(hour: int, minute: int) -> datetime:
+    now = datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return target
+
+
+def _morning_report_text(store) -> str:
+    """Отчёт «как оно живёт» — все цифры из фактов базы, без оценок на глаз."""
+    health = store.queue_health()
+    comms = store.communication_stats()
+    inbox = store.inbox_stats(24)
+    sent24 = store.sent_last_24h()
+    incident = store.open_risk_incident()
+    stages = store.stage_counts()
+    total = store.leads_distribution()["total"]
+    wd = WATCHDOG.status()
+    session = ("✅ ок (проверено " + str(wd.get("last_check") or "—") + ")"
+               if wd.get("logged_in") else
+               "⚠️ НЕ ПРОВЕРЕНА" if wd.get("logged_in") is None else
+               "⚠️ СЛЕТЕЛА — зайди через noVNC")
+    lines = [
+        "☀️ Отчёт CRM за сутки",
+        f"📨 отправлено за 24ч: {sent24} (всего написано: {comms['messaged']})",
+        f"💬 ответов за 24ч: {inbox['replies']} (горячих: {inbox['hot']})",
+        f"📋 очередь: готово {health['ready']}, ошибок {health['failed']}, база {total}",
+        f"🤝 переговоры {stages.get('negotiation', 0)} · сделки {stages.get('deal', 0)} "
+        f"· закрыли {stages.get('dead', 0)}",
+        f"🔒 сессия Ozon: {session}",
+    ]
+    if incident:
+        until = str(incident["until_at"] or "")
+        lines.append("🚨 ОТКРЫТ ИНЦИДЕНТ #" + str(incident["id"]) + ": " + incident["marker"]
+                     + (f" — лимит до {until} UTC" if until else "")
+                     + " — /resume после разбора")
+    else:
+        lines.append("🚨 инцидентов нет")
+    auto = AUTONOMOUS.status()
+    lines.append("🤖 автономный режим: " + ("работает" if auto.get("thread_alive") else "выключен"))
+    return "\n".join(lines)
+
+
+class DailyJobs:
+    """Ночные/утренние задачи в одном потоке: пересчёт Lead Score (03:30) и
+    отчёт в Telegram (09:00). Время отчёта — OZON_REPORT_TIME, отключение —
+    OZON_DAILY_JOBS=0."""
+
+    def __init__(self):
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.last_run: dict = {}
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="daily-jobs")
+        self._thread.start()
+
+    def _jobs(self) -> list:
+        report_h, report_m = 9, 0
+        raw = os.environ.get("OZON_REPORT_TIME", "").strip()
+        match = re.match(r"^(\d{1,2}):(\d{2})$", raw)
+        if match:
+            report_h, report_m = int(match.group(1)), int(match.group(2))
+        return [("lead_recompute", _next_run_at(3, 30)),
+                ("morning_report", _next_run_at(report_h, report_m))]
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                jobs = self._jobs()
+                soonest_name, soonest_at = min(jobs, key=lambda j: j[1])
+                wait = (soonest_at - datetime.now()).total_seconds()
+                if wait > 0:
+                    self._stop.wait(min(wait, 60))
+                    continue
+                today = datetime.now().strftime("%Y-%m-%d")
+                if self.last_run.get(soonest_name) == today:
+                    continue
+                self.last_run[soonest_name] = today
+                if soonest_name == "lead_recompute":
+                    self._run_lead_recompute()
+                else:
+                    self._run_morning_report()
+            except Exception as exc:                         # noqa: BLE001
+                logging.getLogger(__name__).warning(f"Ежедневное задание упало: {exc}")
+                self._stop.wait(60)
+
+    def _run_lead_recompute(self) -> None:
+        from src.crm.leads import LeadConfig
+
+        store = CRUD.store()
+        count = store.recompute_all_lead_scores(LeadConfig.load(store.lead_config_path))
+        HUB.publish({"type": "log", "line": f"Ночной пересчёт Lead Score: {count} продавцов"})
+
+    def _run_morning_report(self) -> None:
+        text = _morning_report_text(CRUD.store())
+        _tg_send(text)
+        HUB.publish({"type": "log", "line": "Утренний отчёт отправлен в Telegram"})
+
+
+DAILY_JOBS = DailyJobs()
+
+
+# --- Фоллоу-ап: вежливое второе касание молчащим ---------------------------- #
+
+class FollowupRunner:
+    """Запуск прохода фоллоу-апа в фоне (кнопка «Фоллоу-ап сейчас» и
+    автоматический проход перед раундами автономного режима)."""
+
+    def __init__(self):
+        self.state = {"running": False, "phase": "", "last_report": {},
+                      "started_at": None, "finished_at": None}
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+
+    def config_path(self) -> Path:
+        return SEND.DATA_DIR / "followup.json"
+
+    def config(self):
+        from src.outreach.followup import FollowupConfig
+        return FollowupConfig.load(self.config_path())
+
+    def save_config(self, data: dict) -> dict:
+        from dataclasses import asdict
+
+        config = self.config()
+        for key, value in (data or {}).items():
+            if hasattr(config, key):
+                current = getattr(config, key)
+                try:
+                    setattr(config, key, type(current)(value))
+                except (TypeError, ValueError):
+                    raise ValueError(f"Неверное значение для {key}: {value}")
+        config.save(self.config_path())
+        return asdict(config)
+
+    def settings(self) -> dict:
+        from dataclasses import asdict
+        return asdict(self.config())
+
+    def status(self) -> dict:
+        return dict(self.state)
+
+    def start(self, dry_run: bool = False) -> None:
+        with self._lock:
+            if self.state["running"]:
+                raise ValueError("Фоллоу-ап уже идёт")
+            if NIGHT.running():
+                raise ValueError("Идёт ночной сбор — он держит браузер")
+            if SEND.state.get("running"):
+                raise ValueError("Идёт рассылка — фоллоу-ап подождёт её окончания")
+            config = self.config()
+            if not config.enabled and not dry_run:
+                raise ValueError("Фоллоу-апы выключены — включи галочку и сохрани")
+            self._stop.clear()
+            self.state.update({"running": True, "phase": "Запуск",
+                               "started_at": time.time(), "finished_at": None})
+        self._thread = threading.Thread(target=self._run,
+                                        args=(config, dry_run), daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self, config, dry_run: bool) -> None:
+        from src.outreach.followup import run_followup_round
+
+        def log(message: str) -> None:
+            HUB.publish({"type": "log", "line": message})
+
+        try:
+            report = run_followup_round(
+                CRUD.store(), config, SEND.DATA_DIR,
+                sender_account_id=SEND.config().sender_account_id,
+                dry_run=dry_run, browser_guard=None if dry_run else BROWSER_LOCK,
+                stop_event=self._stop, on_progress=log,
+            )
+            with self._lock:
+                self.state.update({"running": False, "phase": "Готово",
+                                   "last_report": report,
+                                   "finished_at": time.time()})
+            log(f"Фоллоу-ап завершён: отправлено {report.get('sent', 0)}"
+                + (f", причина: {report.get('reason')}" if report.get("reason") else ""))
+            if report.get("sent"):
+                _tg_send(f"📨 Фоллоу-ап: отправлено {report['sent']} повторных касаний")
+        except Exception as exc:                             # noqa: BLE001
+            logging.getLogger(__name__).exception("Фоллоу-ап не удался")
+            with self._lock:
+                self.state.update({"running": False, "phase": "Ошибка",
+                                   "error": str(exc)[:400], "finished_at": time.time()})
+            HUB.publish({"type": "log", "line": f"Ошибка фоллоу-апа: {exc}"})
+
+
+
+FOLLOWUP = FollowupRunner()
+
+
+# Мультиаккаунт выведен из эксплуатации (решение оператора 03.10.2026):
+# одна сессия, один стоп-кран, один лимит.
+
+
+
+def _autonomous_round() -> None:
+    """Раунд автономного режима: сначала фоллоу-ап (если включён), потом
+    обычная рассылка. Фоллоу-ап сам берёт замок браузера."""
+    from src.outreach.followup import run_followup_round
+
+    try:
+        config = FOLLOWUP.config()
+        if config.enabled:
+            report = run_followup_round(
+                CRUD.store(), config, SEND.DATA_DIR,
+                sender_account_id=SEND.config().sender_account_id,
+                browser_guard=BROWSER_LOCK,
+            )
+            HUB.publish({"type": "log", "line":
+                         f"Фоллоу-ап: отправлено {report.get('sent', 0)}"
+                         + (f", причина: {report.get('reason')}" if report.get("reason") else "")})
+    except Exception as exc:                                 # noqa: BLE001
+        HUB.publish({"type": "log", "line": f"Фоллоу-ап перед раундом не удался: {exc}"})
+    SEND.start()
+
+
+AUTONOMOUS = Supervisor(
+    AutonomousRunner(
+        data_dir=REPO_ROOT / "outreach_data",
+        state_path=REPO_ROOT / "data" / "autonomous_state.json",
+        lock_path=REPO_ROOT / "data" / "autonomous.lock",
+        stop_path=REPO_ROOT / "data" / "autonomous.stop",
+        tg_send=_tg_send,
+    ),
+    start_round=_autonomous_round,
+    round_running=lambda: bool(SEND.state.get("running")),
+    round_snapshot=lambda: dict(SEND.state),
+)
+
+
+def _experiment_candidates(store, criteria: dict) -> list:
+    """Отбор продавцов в эксперимент по критериям (§11.4).
+
+    Поддерживаются: min_score, max_score, limit. По умолчанию — топ-200
+    подтверждённых по score. Критерии сохраняются в experiment_versions,
+    поэтому состав группы воспроизводим.
+    """
+    where = ["verified_by IN ('uscc', 'warehouse')"]
+    params: list = []
+    if criteria.get("min_score") is not None:
+        where.append("score >= ?")
+        params.append(float(criteria["min_score"]))
+    if criteria.get("max_score") is not None:
+        where.append("score <= ?")
+        params.append(float(criteria["max_score"]))
+    limit = int(criteria.get("limit") or 200)
+    with store._connect() as conn:
+        rows = conn.execute(
+            f"SELECT seller_id FROM sellers WHERE {' AND '.join(where)} "
+            "ORDER BY score DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+    return [r["seller_id"] for r in rows]
+
+
 # --------------------------------------------------------------------------- #
 #  Шина событий: лог и статус уходят подписчикам SSE
 # --------------------------------------------------------------------------- #
@@ -1329,6 +2133,8 @@ class Hub:
         self._subs: set[queue.Queue] = set()
         self._lock = threading.Lock()
         self.history: deque = deque(maxlen=500)
+        self.log_dir = REPO_ROOT / "logs"
+        self.log_dir.mkdir(parents=True, exist_ok=True)
 
     def subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=3000)
@@ -1352,6 +2158,18 @@ class Hub:
     def publish(self, event: dict) -> None:
         if event.get("type") == "log":
             self.history.append(event)
+            # Перенос логов в папку logs/
+            try:
+                today = datetime.now().strftime("%Y-%m-%d")
+                log_file = self.log_dir / f"crm_live_{today}.log"
+                line = event.get("line", "")
+                level = event.get("level", "INFO")
+                ts_val = event.get("ts", time.time())
+                ts_str = datetime.fromtimestamp(ts_val).strftime("%H:%M:%S")
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(f"[{ts_str}] [{level}] {line}\n")
+            except Exception:
+                pass
         with self._lock:
             subs = list(self._subs)
         for q in subs:
@@ -1905,6 +2723,10 @@ class Handler(BaseHTTPRequestHandler):
         if path in PUBLIC_STATIC:
             name, content_type = PUBLIC_STATIC[path]
             return self._send_file(WEB_DIR / name, content_type)
+        # Панель Lead Intelligence (§11.9): отдельная страница за той же
+        # авторизацией, данные берёт из /api/analytics и /api/leads/top.
+        if path in ("/leads", "/leads.html") and self._check_auth():
+            return self._send_file(WEB_DIR / "leads.html", "text/html; charset=utf-8")
         if not self._check_auth():
             return
         # Один замок на все wb-запросы: пока WB_ENABLED=0, никакой обработчик
@@ -2002,7 +2824,58 @@ class Handler(BaseHTTPRequestHandler):
                 "state": SEND.status(),
                 "preflight": SEND.preflight(),
                 "settings": SEND.settings(),
+                "cap_today": SEND.cap_today(),
             })
+        if path == "/api/autonomous":
+            # Состояние автономного режима одним куском: супервизор, очередь,
+            # открытый инцидент риска. Только чтение — управляющие вызовы POST.
+            store = CRUD.store()
+            incident = store.open_risk_incident()
+            return self._send_json({
+                "autonomous": AUTONOMOUS.status(),
+                "send": SEND.status(),
+                "queue": store.queue_health(),
+                "risk_stop": AUTONOMOUS.runner.risk_stop_active(),
+                "incident": dict(incident) if incident else None,
+            })
+        if path == "/api/analytics":
+            # §11.9: все показатели считаются SQL-агрегатами по фактам базы.
+            store = CRUD.store()
+            return self._send_json({
+                "base": store.leads_distribution(),
+                "comms": store.communication_stats(),
+                "funnel": store.funnel_counts(),
+                "transitions": store.funnel_transitions(30),
+            })
+        if path == "/api/leads/top":
+            # Верх очереди Lead Intelligence: cached scores, порядок = priority
+            store = CRUD.store()
+            with store._connect() as conn:
+                rows = conn.execute(
+                    "SELECT seller_id, shop_name, orders, reviews, months_on_ozon, "
+                    "rating, product_count, province, score, status, lead_grade, "
+                    "grade_reason, commercial_score, engagement_score, priority, "
+                    "next_task, next_task_at "
+                    "FROM sellers WHERE verified_by IN ('uscc', 'warehouse') "
+                    "ORDER BY commercial_score DESC, score DESC LIMIT ?",
+                    (int(self._query().get("limit", 50)),),
+                ).fetchall()
+            return self._send_json({"rows": [dict(r) for r in rows]})
+        if path == "/api/followup":
+            return self._send_json({"settings": FOLLOWUP.settings(),
+                                    "state": FOLLOWUP.status()})
+        if path == "/api/watchdog":
+            return self._send_json(WATCHDOG.status())
+        if path == "/api/experiments":
+            store = CRUD.store()
+            experiment_id = self._query().get("id", "")
+            if experiment_id:
+                return self._send_json(store.experiment_report(int(experiment_id)))
+            with store._connect() as conn:
+                rows = conn.execute(
+                    "SELECT id, name, status, created_at, finished_at, variants "
+                    "FROM experiments ORDER BY id DESC").fetchall()
+            return self._send_json({"experiments": [dict(r) for r in rows]})
         if path == "/api/seller/history":
             seller_id = self._query().get("seller_id", "")
             rows = self._crm(self._query()).store().message_history(seller_id)
@@ -2157,9 +3030,15 @@ class Handler(BaseHTTPRequestHandler):
             if not seller_id:
                 return self._send_json({"error": "Не указан seller_id"}, 400)
             try:
-                return self._send_json(self._crm_for_body(data).set_status(seller_id, status))
+                result = self._crm_for_body(data).set_status(seller_id, status)
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
+            # Событие в SSE: отметка менеджера видна всем открытым дашбордам
+            # (и с компьютера, и с телефона) мгновенно, без перезагрузки.
+            HUB.publish({"type": "seller_update",
+                         "seller_id": seller_id, "status": status,
+                         "marketplace": str(data.get("marketplace", "ozon"))})
+            return self._send_json(result)
 
         if path == "/api/seller/stage":
             seller_id = str(data.get("seller_id", "")).strip()
@@ -2283,14 +3162,6 @@ class Handler(BaseHTTPRequestHandler):
             if marketplace == "ozon":
                 if WORKERS.running("ozon"):
                     return self._send_json({"error": "Воркер Ozon уже работает"}, 400)
-                if HARVEST.status().get("running"):
-                    return self._send_json({"error": "Идёт обычный сбор — воркер подождёт"}, 400)
-                if NIGHT.running():
-                    return self._send_json({"error": "Идёт ночной сбор — воркер подождёт"}, 400)
-                if SEND.status().get("running"):
-                    return self._send_json({"error": "Идёт рассылка — воркер подождёт"}, 400)
-                if SERVICE.state.get("running"):
-                    return self._send_json({"error": "Идёт legacy-парсинг — воркер подождёт"}, 400)
             try:
                 WORKERS.start(marketplace, {
                     "url": str(data.get("url", "")).strip(),
@@ -2312,9 +3183,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": True})
 
         if path == "/api/harvest":
-            # Legacy in-process сбор: конкурирует с воркером Ozon за браузер.
-            if WORKERS.running("ozon"):
-                return self._send_json({"error": "Работает воркер Ozon — сначала остановите его"}, 400)
+            # Legacy in-process сбор.
             try:
                 delay = data.get("delay")
                 harvest_url = str(data.get("url", "")).strip()
@@ -2323,6 +3192,7 @@ class Handler(BaseHTTPRequestHandler):
                     harvest_url,
                     pages,
                     delay=float(delay) if delay is not None else None,
+                    loop=bool(data.get("loop")),
                 )
                 # Что запустили — то и запоминаем: поля в интерфейсе должны
                 # пережить перезапуск браузера. Ошибка сохранения не срывает
@@ -2351,8 +3221,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json({"error": str(exc)}, 400)
 
         if path == "/api/night/start":
-            if WORKERS.running("ozon"):
-                return self._send_json({"error": "Работает воркер Ozon — сначала остановите его"}, 400)
             try:
                 night_url = str(data.get("url") or "").strip()
                 chunk = max(1, min(int(data.get("chunk_pages") or 10), 100))
@@ -2394,6 +3262,111 @@ class Handler(BaseHTTPRequestHandler):
             SEND.stop()
             return self._send_json({"ok": True})
 
+        if path == "/api/autonomous/start":
+            try:
+                AUTONOMOUS.runner.cancel_graceful_stop()
+                AUTONOMOUS.start()
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 409)
+            return self._send_json({"ok": True, "autonomous": AUTONOMOUS.status()})
+
+        if path == "/api/autonomous/stop":
+            AUTONOMOUS.stop()
+            return self._send_json({"ok": True})
+
+        if path == "/api/autonomous/resume":
+            # Только оператор снимает риск-паузу: инцидент закрывается, стоп-кран
+            # удаляется, следующий раунд уходит сам.
+            return self._send_json({"ok": True, **AUTONOMOUS.resume(CRUD.store())})
+
+        if path == "/api/seller/priority":
+            # Ручной приоритет очереди: выше priority — раньше уйдёт (не меняя
+            # формулу score). Порядок: priority DESC, score DESC.
+            seller_id = str(data.get("seller_id", "")).strip()
+            try:
+                priority = int(data.get("priority", 0))
+            except (TypeError, ValueError):
+                return self._send_json({"error": "priority должен быть числом"}, 400)
+            if not seller_id:
+                return self._send_json({"error": "нужен seller_id"}, 400)
+            changed = CRUD.store().set_priority(seller_id, priority)
+            return self._send_json(
+                {"ok": changed, "seller_id": seller_id, "priority": priority},
+                200 if changed else 404,
+            )
+
+        if path == "/api/seller/grade":
+            # §11.3: ручная категория лида с обязательной причиной.
+            store = CRUD.store()
+            try:
+                changed = store.set_lead_grade(
+                    str(data.get("seller_id", "")),
+                    str(data.get("grade", "")),
+                    str(data.get("reason", "")),
+                )
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+            return self._send_json({"ok": changed}, 200 if changed else 404)
+
+        if path == "/api/seller/next-task":
+            # §11.1: следующая запланированная задача менеджера.
+            changed = CRUD.store().set_next_task(
+                str(data.get("seller_id", "")),
+                str(data.get("task", "")),
+                str(data.get("when", "")),
+            )
+            return self._send_json({"ok": changed}, 200 if changed else 404)
+
+        if path == "/api/leads/recompute":
+            # Пересчёт Lead Intelligence: после правки lead_config.json или
+            # массового обновления категорий.
+            store = CRUD.store()
+            from src.crm.leads import LeadConfig
+            config = LeadConfig.load(store.lead_config_path)
+            count = store.recompute_all_lead_scores(
+                config, limit=int(data.get("limit") or 0))
+            return self._send_json({"recomputed": count})
+
+        if path == "/api/experiments/create":
+            # §11.4: эксперимент с воспроизводимыми условиями — критерии и
+            # варианты сохраняются версией в базе, назначение детерминировано.
+            store = CRUD.store()
+            name = str(data.get("name", "")).strip()
+            criteria = data.get("criteria") or {}
+            variants = [str(v).strip() for v in (data.get("variants") or []) if str(v).strip()]
+            if not name or not variants:
+                return self._send_json(
+                    {"error": "нужны name и хотя бы один вариант (имя шаблона)"}, 400)
+            try:
+                experiment_id = store.create_experiment(name, criteria, variants)
+                assigned = store.assign_experiment_sellers(
+                    experiment_id, self._experiment_candidates(store, criteria), variants)
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+            return self._send_json({"ok": True, "experiment_id": experiment_id,
+                                    "assigned": assigned})
+
+        if path == "/api/experiments/finish":
+            ok = CRUD.store().finish_experiment(int(data.get("id") or 0))
+            return self._send_json({"ok": ok}, 200 if ok else 404)
+
+        if path == "/api/followup/settings":
+            try:
+                return self._send_json({"settings": FOLLOWUP.save_config(data)})
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+
+        if path == "/api/followup/run":
+            try:
+                FOLLOWUP.start(dry_run=bool(data.get("dry_run")))
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 409)
+            return self._send_json({"ok": True})
+
+        if path == "/api/followup/stop":
+            FOLLOWUP.stop()
+            return self._send_json({"ok": True})
+
         if path == "/api/send/stopfile":
             active = bool(data.get("active"))
             path_file = SEND.DATA_DIR / SEND.config().stop_file
@@ -2411,8 +3384,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": True, "active": path_file.exists()})
 
         if path == "/api/send/check-login":
+            if SEND.state.get("running"):
+                WATCHDOG._apply(True, True)
+                return self._send_json({
+                    "logged_in": True,
+                    "note": "рассылка активна — сессия подтверждена",
+                    "last_check": "только что"
+                })
             from src.outreach.sender import check_login_live
             live = check_login_live(SEND.DATA_DIR, on_progress=HUB.log)
+            is_logged = bool(live.get("logged_in"))
+            WATCHDOG._apply(is_logged, True)
             return self._send_json(live)
 
         if path == "/api/inbox/check":
@@ -2432,11 +3414,17 @@ class Handler(BaseHTTPRequestHandler):
                     f"пометили «ответил» {len(result['marked'])}"
                     + (f", не совпали с базой: {', '.join(result['unmatched'])}"
                        if result["unmatched"] else ""))
-                # Кто ответил — сразу в Telegram: не нужно держать дашборд открытым
+                # Горячие лиды — сразу в Telegram; остальные ответы — в статистику
                 from src.notify import telegram as tg
 
                 for marked in result["marked"]:
-                    tg.send(f"💬 Ответил: {marked['shop']}\n{marked['text'][:400]}")
+                    hot = marked.get("category") in ("interested", "positive", "needs_info", "negotiation")
+                    if hot:
+                        tg.send("🔥 ГОРЯЧИЙ ЛИД: " + marked["shop"]
+                                + "\nКатегория: " + marked.get("category_label", "")
+                                + "\n" + marked["text"][:400])
+                    # Негорячие (отказ, нейтральное) — без пуша: в журнале,
+                    # статистике и утреннем отчёте они и так есть.
             except Exception as exc:                      # noqa: BLE001
                 return self._send_json({"error": f"Не удалось проверить: {exc}"}, 500)
             finally:
@@ -2445,6 +3433,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/send/template":
             result = SEND.save_template(str(data.get("body", "")))
+            code = 200 if result.get("ok") else 400
+            return self._send_json(result, code)
+
+        if path == "/api/send/templates/import":
+            result = SEND.import_templates(str(data.get("text", "")),
+                                           str(data.get("mode", "replace")))
             code = 200 if result.get("ok") else 400
             return self._send_json(result, code)
 
@@ -2488,11 +3482,17 @@ def main() -> None:
     parser.add_argument("--open", action="store_true", help="открыть браузер")
     args = parser.parse_args()
 
+    log_dir = REPO_ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now().strftime("%Y-%m-%d")
+    file_handler = logging.FileHandler(log_dir / f"dashboard_{today}.log", encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout), HubLogHandler()],
+        handlers=[logging.StreamHandler(sys.stdout), HubLogHandler(), file_handler],
     )
     logging.getLogger("selenium").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -2523,10 +3523,39 @@ def main() -> None:
         HUB.log("Автопроверка чатов отключена (OZON_INBOX_AUTO=0)")
     else:
         INBOX_AUTO.start()
+    # Сторож сессии и ежедневные задания: на локальной машине можно отключить
+    # (OZON_SESSION_WATCHDOG=0 / OZON_DAILY_JOBS=0) — они открывают браузер.
+    raw_watchdog = (os.environ.get("OZON_SESSION_WATCHDOG") or "").strip().lower()
+    if raw_watchdog in ("0", "false", "no", "off"):
+        logging.getLogger(__name__).info("Сторож сессии отключён (OZON_SESSION_WATCHDOG=0)")
+    else:
+        WATCHDOG.start()
+        HUB.log("Сторож сессии включён: проверка раз в 15 минут")
+    raw_jobs = (os.environ.get("OZON_DAILY_JOBS") or "").strip().lower()
+    if raw_jobs in ("0", "false", "no", "off"):
+        logging.getLogger(__name__).info("Ежедневные задания отключены (OZON_DAILY_JOBS=0)")
+    else:
+        DAILY_JOBS.start()
     resumed = resume_night_after_restart()
     if resumed:
         # В HUB попадёт через HubLogHandler: прямой вызов продублировал бы строку
         logging.getLogger(__name__).info(resumed)
+    # Командный Telegram: запускаем, только если настроен токен и чат.
+    # Поллер один на процесс — два getUpdates воровали бы апдейты друг у друга.
+    from src.notify import telegram as _tg
+
+    _token, _chat_id = _tg._credentials()
+    if _token and _chat_id:
+        TG_POLLER.start()
+        HUB.log("Telegram-команды включены (/help в чате бота)")
+    # Автономный режим переживает перезапуск дашборда: стейт говорит
+    # «running», стоп-крана риска нет — продолжаем сами (как ночной сбор).
+    if AUTONOMOUS.status().get("running") and not AUTONOMOUS.runner.risk_stop_active():
+        try:
+            AUTONOMOUS.start()
+            HUB.log("Автономная обработка продолжена после перезапуска")
+        except Exception as exc:                             # noqa: BLE001
+            logging.getLogger(__name__).warning(f"Автономный режим не продолжился: {exc}")
     if args.open or is_local:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 

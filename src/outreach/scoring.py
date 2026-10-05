@@ -121,6 +121,12 @@ class SellerMetrics:
     chinese_reasons: str = ""
     score: float = 0.0
     score_parts: dict = field(default_factory=dict)
+    
+    recent_rating: float = 0.0
+    unanswered_reviews: int = 0
+    unanswered_questions: int = 0
+    pain_score: float = 0.0
+    vitality_category: str = "unknown"
 
     @classmethod
     def from_raw(
@@ -153,6 +159,8 @@ class ScoreWeights:
     reviews: float = 0.6
     tenure: float = 0.05
     rating: float = 2.0
+    overwhelmed: float = 1.5
+    cost_saving: float = 1.0
 
     def as_dict(self) -> dict:
         return {
@@ -160,6 +168,8 @@ class ScoreWeights:
             "reviews": self.reviews,
             "tenure": self.tenure,
             "rating": self.rating,
+            "overwhelmed": self.overwhelmed,
+            "cost_saving": self.cost_saving,
         }
 
 
@@ -182,14 +192,18 @@ def score_seller(metrics: SellerMetrics, weights: ScoreWeights = DEFAULT_WEIGHTS
     reviews_part = weights.reviews * _log10(metrics.reviews)
     tenure_part = weights.tenure * metrics.months_on_ozon
     rating_part = weights.rating * metrics.rating
+    overwhelmed_part = weights.overwhelmed * _log10(metrics.pain_score) if metrics.pain_score > 0 else 0.0
+    cost_saving_part = weights.cost_saving * int(metrics.is_chinese)
 
     metrics.score_parts = {
         "orders": round(orders_part, 3),
         "reviews": round(reviews_part, 3),
         "tenure": round(tenure_part, 3),
         "rating": round(rating_part, 3),
+        "overwhelmed": round(overwhelmed_part, 3),
+        "cost_saving": round(cost_saving_part, 3),
     }
-    metrics.score = round(orders_part + reviews_part + tenure_part + rating_part, 3)
+    metrics.score = round(orders_part + reviews_part + tenure_part + rating_part + overwhelmed_part + cost_saving_part, 3)
     return metrics.score
 
 

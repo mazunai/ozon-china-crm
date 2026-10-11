@@ -1,0 +1,6 @@
+[variables]
+RAILPACK_PYTHON_VERSION = "3.12"
+NIXPACKS_PYTHON_VERSION = "3.12"
+
+[phases.setup]
+nixPkgs = ["python312"]

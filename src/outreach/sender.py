@@ -81,6 +81,12 @@ class SenderConfig:
     # дневной лимит режется (adaptive_cap_factor) — сигнал «жмём», а не повод
     # гнать объём дальше.
     adaptive_slowdown: bool = True
+    # Фильтрация целевого сегмента продавцов
+    min_orders: Optional[int] = None
+    max_orders: Optional[int] = None
+    min_reviews: Optional[int] = None
+    max_reviews: Optional[int] = None
+    allowed_templates: List[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> "SenderConfig":
@@ -564,13 +570,38 @@ class ChatClient:
         Поле ввода, не появившееся после клика, пробуем второй раз: чат иногда
         не раскрывается с первого открытия страницы.
         """
-        from selenium.common.exceptions import TimeoutException
-
         url = f"https://www.ozon.ru/seller/{seller_id}/"
         for attempt in (1, 2):
             self._focus()
-            self.driver.get(url)
+            try:
+                # Если висит системный диалог/алерт — закрываем его
+                try:
+                    alert = self.driver.switch_to.alert
+                    alert.accept()
+                except Exception:
+                    pass
+                self.driver.get(url)
+            except Exception:
+                self._focus()
+                try:
+                    self.driver.get(url)
+                except Exception:
+                    pass
             self._focus()
+
+            # Проверяем, что браузер реально перешёл на Ozon, а не остался на дашборде
+            current_url = getattr(self.driver, "current_url", "") or ""
+            if "ozon.ru" not in current_url:
+                if attempt == 2:
+                    raise RuntimeError(
+                        f"Браузер не перешёл на Ozon (текущий URL: {current_url}) — переход сорвался"
+                    )
+                time.sleep(2)
+                continue
+
+            # Имитация человеческого поведения: просмотр страницы, скролл, изучение
+            from ..utils.human_cursor import human_browse_page, human_click
+            human_browse_page(self.driver, min_seconds=3.0, max_seconds=6.0)
 
             button = None
             deadline = time.time() + 8
@@ -581,12 +612,17 @@ class ChatClient:
                     break
                 time.sleep(0.5)
             if button is None:
+                # Если страница не Ozon или не страница магазина — это сбой перехода, а не закрытая личка продавца!
+                current_url = getattr(self.driver, "current_url", "") or ""
+                if "ozon.ru" not in current_url or ("/seller/" not in current_url and str(seller_id) not in current_url):
+                    raise RuntimeError(
+                        f"Страница продавца не загрузилась (URL: {current_url}) — повторим позже"
+                    )
                 raise NoChatAvailable(
                     "нет кнопки «Написать» — личные сообщения закрыты"
                 )
 
-            from ..utils.human_cursor import human_click
-            time.sleep(random.uniform(0.3, 0.6))
+            time.sleep(random.uniform(0.4, 0.8))
             try:
                 human_click(self.driver, button)
             except Exception:
@@ -642,56 +678,95 @@ class ChatClient:
 
         self._set_field_value(field, text)
         time.sleep(random.uniform(0.5, 1.0))
-        button = self.wait_for(self.selectors.send_button)
+        sent_clicked = False
         try:
-            human_click(self.driver, button)
+            button = self.wait_for(self.selectors.send_button, timeout=5)
+            try:
+                human_click(self.driver, button)
+                sent_clicked = True
+            except Exception:
+                self.driver.execute_script("arguments[0].click();", button)
+                sent_clicked = True
         except Exception:
-            self.driver.execute_script("arguments[0].click();", button)
+            pass
 
-    def _set_field_value(self, field, text: str) -> None:
-        """Вводит текст через нативный send_keys (эмуляция действий человека).
-        
-        Использование JS-сеттера (Object.getOwnPropertyDescriptor().set)
-        спровоцировало блокировку (isTrusted=false). Нативный ввод
-        генерирует реальные события клавиатуры, не отличающиеся от человека.
-        """
-        from selenium.webdriver.common.keys import Keys
-        import random
-        
-        field.clear()
-        lines = text.split("\n")
-        for index, line in enumerate(lines):
-            # Вводим по кускам, чтобы Selenium генерировал реальные нажатия клавиш
-            if line:
-                field.send_keys(line)
-                time.sleep(random.uniform(0.1, 0.3))
-            
-            # Вместо \n (который сразу отправит сообщение), нажимаем Shift+Enter
-            if index < len(lines) - 1:
-                field.send_keys(Keys.SHIFT + Keys.ENTER)
-                time.sleep(random.uniform(0.1, 0.2))
+        if not sent_clicked:
+            # Fallback: нажимаем Enter в поле ввода
+            try:
+                from selenium.webdriver.common.keys import Keys
+                field.send_keys(Keys.ENTER)
+            except Exception:
+                pass
 
     def _clear_field(self, field) -> None:
-        """Очищает поле ввода так, чтобы это увидел фронтенд Ozon."""
+        """Очищает поле ввода полностью и надёжно: комбинацией клавиш, JS-сеттером React и проверкой."""
+        from selenium.webdriver.common.keys import Keys
+        # 1. Нативное выделение и удаление через клавиатуру (Ctrl+A / Cmd+A + Backspace)
+        try:
+            field.click()
+            time.sleep(0.2)
+            field.send_keys(Keys.CONTROL, "a")
+            field.send_keys(Keys.COMMAND, "a")
+            field.send_keys(Keys.BACKSPACE)
+            time.sleep(0.3)
+        except Exception:
+            pass
+
+        # 2. React prototype setter для сброса внутреннего состояния инпута Ozon
         try:
             self.driver.execute_script(
                 """
                 const el = arguments[0];
+                el.focus();
                 const proto = el.tagName === 'TEXTAREA'
                   ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-                const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-                setter.call(el, '');
+                const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                if (desc && desc.set) {
+                    desc.set.call(el, '');
+                } else {
+                    el.value = '';
+                }
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
                 """,
                 field,
             )
-        except Exception:                                    # noqa: BLE001
-            # Запасной путь: обычный clear(), если JS недоступен
-            try:
-                field.clear()
-            except Exception:                                # noqa: BLE001
-                pass
+            time.sleep(0.3)
+        except Exception:
+            pass
+
+        # 3. Контрольная проверка: если что-то осталось, выбиваем Backspace посимвольно
+        try:
+            val = str(field.get_attribute("value") or "").strip()
+            if val:
+                field.send_keys(Keys.CONTROL, "a")
+                field.send_keys(Keys.BACKSPACE)
+                time.sleep(0.2)
+                for _ in range(len(val) + 5):
+                    field.send_keys(Keys.BACKSPACE)
+        except Exception:
+            pass
+
+    def _set_field_value(self, field, text: str) -> None:
+        """Очищает поле и вводит новый текст по 1 символу в секунду (эмуляция действий человека)."""
+        from selenium.webdriver.common.keys import Keys
+        import random
+
+        # Полная гарантированная очистка перед вводом
+        self._clear_field(field)
+        time.sleep(random.uniform(0.6, 1.2))
+
+        lines = text.split("\n")
+        for index, line in enumerate(lines):
+            for char in line:
+                field.send_keys(char)
+                # Раз в секунду с естественным микро-разбросом человека (0.85 - 1.15 сек)
+                time.sleep(random.uniform(0.85, 1.15))
+            
+            # Вместо \n (который сразу отправит сообщение), нажимаем Shift+Enter
+            if index < len(lines) - 1:
+                field.send_keys(Keys.SHIFT + Keys.ENTER)
+                time.sleep(random.uniform(1.2, 2.0))
 
     def field_is_empty(self) -> bool:
         """Опустело ли поле. Косвенный признак того, что сообщение ушло."""
@@ -744,6 +819,18 @@ return [...document.querySelectorAll('[is-mine]')]
 """
         self._focus()
         return [str(t) for t in (self.driver.execute_script(script) or []) if str(t).strip()]
+
+    def has_existing_dialog(self) -> bool:
+        """Проверяет, есть ли в открытом чате уже отправленные или входящие сообщения."""
+        self._focus()
+        try:
+            # Ищем любые пузыри сообщений в DOM чата Ozon
+            count = self.driver.execute_script("""
+                return document.querySelectorAll('[is-mine], [class*="messageBubble"], [class*="chat-message"], [data-widget="chatMessage"]').length;
+            """)
+            return bool(count and int(count) > 0)
+        except Exception:
+            return False
 
 
 def preflight(config: SenderConfig, template, data_dir: Path, store=None,
@@ -1071,6 +1158,16 @@ def run_queue(
     # текстов в каталоге, и ротация работает всегда.
     if not isinstance(template, TemplatePool):
         template = TemplatePool([template])
+    elif config.allowed_templates:
+        # Фильтруем пул шаблонов только до разрешённых (например, только тексты с анализом)
+        filtered = [t for t in template if t.name in config.allowed_templates]
+        if filtered:
+            template = TemplatePool(filtered)
+        else:
+            logger.warning(
+                f"Ни один шаблон не совпал с allowed_templates={config.allowed_templates}. "
+                f"Используем все доступные ({[t.name for t in template]})."
+            )
 
     def next_message(row) -> Tuple[str, str, str]:
         """Текст, имя шаблона и experiment_id (если продавец в эксперименте).
@@ -1130,15 +1227,22 @@ def run_queue(
             except Exception:                              # noqa: BLE001
                 logger.warning("Не записал инцидент риска в базу", exc_info=True)
         emit("risk", marker=exc.marker, stage=exc.stage, seller_id=current_seller)
-        progress(
-            f"СТОП — ограничение платформы (маркер «{exc.marker}», "
-            f"этап: {exc.stage or 'неизвестен'}). "
-            "Отправка остановлена, стоп-кран установлен, инцидент записан. "
+        msg_text = (
+            f"⚠️ ВНИМАНИЕ: СТОП — ограничение платформы!\n\n"
+            f"Маркер: «{exc.marker}»\n"
+            f"Этап: {exc.stage or 'неизвестен'}\n\n"
+            "Отправка остановлена, стоп-кран установлен, инцидент записан.\n"
             + (f"Платформа разрешит отправку после {until_at}. "
                "Сторож снимет стоп-кран сам в этот срок."
                if until_at else
                "Срок снятия платформа не назвала — дальше только вручную (/resume).")
         )
+        progress(msg_text)
+        try:
+            from ..notify.telegram import send as tg_send
+            tg_send(msg_text)
+        except Exception as tg_exc:
+            logger.warning(f"Failed to send tg notification: {tg_exc}")
 
     def rebuild_browser() -> None:
         """Пересоздаёт подключение, если вкладку отправщика закрыли.
@@ -1196,8 +1300,18 @@ def run_queue(
                     "Войдите в аккаунт в открывшемся окне и запустите снова."
                 )
 
+            # Поведенческий прогрев аккаунта (имитация действий живого покупателя раз в сутки)
+            try:
+                from .warmup import run_buyer_warmup, should_warmup_today
+                acc_name = config.sender_account_id or "main"
+                if should_warmup_today(data_dir, acc_name):
+                    run_buyer_warmup(driver, data_dir, account_id=acc_name, on_progress=progress)
+            except Exception as warm_exc:  # noqa: BLE001
+                logger.debug(f"Warmup error ignored: {warm_exc}")
+
         consecutive_failures = 0
         consecutive_no_chat = 0
+        transient_streak = 0
         while True:
             if cancelled():
                 if kill_switch_active(stop_file):
@@ -1227,7 +1341,14 @@ def run_queue(
             # кандидата, ничего не меняя.
             if config.dry_run:
                 candidates = queue.list_sellers(
-                    verified_only=True, statuses=[STATUS_NEW], limit=1, offset=0
+                    verified_only=True,
+                    statuses=[STATUS_NEW],
+                    min_orders=config.min_orders,
+                    max_orders=config.max_orders,
+                    min_reviews=config.min_reviews,
+                    max_reviews=config.max_reviews,
+                    limit=1,
+                    offset=0,
                 ) if hasattr(queue, "list_sellers") else []
                 if not candidates:
                     report["stopped_reason"] = "очередь пуста"
@@ -1245,7 +1366,13 @@ def run_queue(
                                      "message": message, "template": template_name}
                 break
 
-            row = queue.claim_next(order_fresh=config.fresh_first)
+            row = queue.claim_next(
+                order_fresh=config.fresh_first,
+                min_orders=config.min_orders,
+                max_orders=config.max_orders,
+                min_reviews=config.min_reviews,
+                max_reviews=config.max_reviews,
+            )
             if not row:
                 if config.loop and not once:
                     # Режим «по кругу»: пустая очередь — не остановка, а пауза.

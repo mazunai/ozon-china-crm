@@ -179,6 +179,7 @@ class SeleniumManager:
             cmd = [
                 binary,
                 f"--remote-debugging-port={self.debug_port}",
+                "--remote-allow-origins=*",
                 f"--user-data-dir={self.profile_dir}",
                 "--no-first-run",
                 "--no-default-browser-check",
@@ -210,6 +211,7 @@ class SeleniumManager:
                 raise RuntimeError("Chrome не открыл порт отладки за 40 секунд")
 
         options = Options()
+        options.add_argument("--remote-allow-origins=*")
         options.add_experimental_option("debuggerAddress", f"127.0.0.1:{self.debug_port}")
         driver = webdriver.Chrome(options=options)
 
@@ -276,15 +278,49 @@ class SeleniumManager:
             logger.warning(f"Не удалось обеспечить открытую вкладку: {exc}")
             return False
 
+    def _is_foreign_tab(self, handle: str) -> bool:
+        """Проверяет, не принадлежит ли вкладка веб-дашборду или системным страницам."""
+        try:
+            prev = self.driver.current_window_handle
+            self.driver.switch_to.window(handle)
+            url = (self.driver.current_url or "").lower()
+            if prev != handle:
+                self.driver.switch_to.window(prev)
+            return any(d in url for d in ("sh-coding.ru", "localhost:8000", "127.0.0.1:8000", "0.0.0.0:8000"))
+        except Exception:
+            return False
+
     def _focus_tab(self) -> None:
-        """Делает активной вкладку этого воркера перед любой операцией."""
-        if not self.driver or not self._tab_handle:
+        """Делает активной вкладку этого воркера перед любой операцией с авто-восстановлением при закрытии."""
+        if not self.driver:
             return
         try:
+            handles = self.driver.window_handles
+            if not handles:
+                self.driver.switch_to.new_window("tab")
+                handles = self.driver.window_handles
+                self._tab_handle = handles[0] if handles else None
+
+            # Если вкладка закрыта или указывает на дашборд — находим безопасную или открываем новую
+            if not self._tab_handle or self._tab_handle not in handles or self._is_foreign_tab(self._tab_handle):
+                safe = [h for h in handles if not self._is_foreign_tab(h)]
+                if safe:
+                    self._tab_handle = safe[-1]
+                else:
+                    self.driver.switch_to.new_window("tab")
+                    self._tab_handle = self.driver.current_window_handle
+
             if self.driver.current_window_handle != self._tab_handle:
                 self.driver.switch_to.window(self._tab_handle)
         except Exception as exc:                            # noqa: BLE001
-            logger.debug(f"Не удалось переключиться на свою вкладку: {exc}")
+            try:
+                handles = self.driver.window_handles
+                if handles:
+                    self._tab_handle = handles[-1]
+                    self.driver.switch_to.window(self._tab_handle)
+            except Exception:
+                pass
+
 
     def _create_driver_legacy(self) -> webdriver.Chrome:
         chrome_options = Options()

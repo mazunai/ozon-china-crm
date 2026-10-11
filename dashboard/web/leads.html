@@ -36,6 +36,19 @@
          overflow:hidden; margin-top:6px; }
   .bar i { display:block; height:100%; background:var(--accent); }
   #err { color:var(--bad); padding:0 24px; }
+
+  .kanban-board { display:flex; gap:16px; overflow-x:auto; padding-bottom:12px; }
+  .kanban-col { background:var(--bg); border:1px solid var(--line); border-radius:8px; width:260px; flex-shrink:0; display:flex; flex-direction:column; max-height:80vh; }
+  .kanban-header { padding:12px; font-weight:600; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:1; }
+  .kanban-items { padding:8px; overflow-y:auto; flex:1; min-height:100px; }
+  .kanban-card { background:var(--card); border:1px solid var(--line); padding:10px; border-radius:6px; margin-bottom:8px; cursor:grab; }
+  .kanban-card:active { cursor:grabbing; }
+  .inbox-list { display: flex; flex-direction: column; gap: 10px; }
+  .inbox-item { background:var(--card); border:1px solid var(--line); padding:12px; border-radius:8px; display:flex; justify-content:space-between; align-items:flex-start; }
+  .inbox-meta { flex: 1; }
+  .inbox-actions { display:flex; gap:8px; }
+  .inbox-hot { border-left: 4px solid var(--warn); }
+
 </style>
 </head>
 <body>
@@ -79,9 +92,32 @@
   </section>
 
   <section>
-    <h2>Эксперименты</h2>
-    <div id="experiments" class="muted">—</div>
+    <h2>Template A/B Testing & Outreach Analytics</h2>
+    <div id="experiments" class="muted" style="margin-bottom: 12px;">—</div>
+    <div style="display:flex; gap:8px;">
+        <input type="text" id="expName" placeholder="Название эксперимента">
+        <input type="text" id="expVariants" placeholder="Варианты (через запятую, напр. v1, v2)">
+        <button onclick="createExp()">Запустить A/B Тест</button>
+    </div>
   </section>
+
+  <section>
+    <h2>Kanban Pipeline Board</h2>
+    <div id="kanban" class="kanban-board">
+        <div class="muted">Загрузка доски...</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Unified Manager Inbox & Triage</h2>
+    <div style="margin-bottom: 12px;">
+      <label><input type="checkbox" id="inboxHotFilter" onchange="loadInbox()"> Только горячие лиды (Interested / Negotiation / Deal / Positive)</label>
+    </div>
+    <div id="inbox" class="inbox-list">
+        <div class="muted">Загрузка инбокса...</div>
+    </div>
+  </section>
+
 </main>
 
 <script>
@@ -175,6 +211,132 @@ async function load() {
   }
 }
 load();
+
+async function loadKanban() {
+    try {
+        const res = await fetch("/api/sellers?limit=1000");
+        const data = await res.json();
+        const sellers = data.rows || [];
+
+        const stages = [
+          { id: "new", name: "Новые" },
+          { id: "contacted", name: "Контакт состоялся" },
+          { id: "replied", name: "Ответили" },
+          { id: "interested", name: "Заинтересованы" },
+          { id: "negotiation", name: "Переговоры" },
+          { id: "deal", name: "Сделка" },
+          { id: "lost", name: "Потеряны" }
+        ];
+
+        let html = "";
+        for (const s of stages) {
+            html += `<div class="kanban-col" data-stage="${s.id}">
+                <div class="kanban-header">${s.name}</div>
+                <div class="kanban-items" ondragover="event.preventDefault()" ondrop="dropCard(event, '${s.id}')">
+            `;
+            const stageSellers = sellers.filter(x => (x.stage || "new") === s.id || (x.stage==='' && s.id==='new'));
+            for (const seller of stageSellers) {
+                html += `<div class="kanban-card" draggable="true" ondragstart="dragStart(event, '${seller.seller_id}')">
+                    <b>${esc(seller.shop_name)}</b><br>
+                    <span class="muted">${esc(seller.company_name || 'без названия')}</span><br>
+                    <span style="font-size:11px;color:var(--muted)">Рейтинг: ${esc(seller.rating)} | Коммерч: ${esc(Math.round(seller.commercial_score || 0))}</span>
+                </div>`;
+            }
+            html += `</div></div>`;
+        }
+        document.getElementById("kanban").innerHTML = html;
+    } catch (e) {
+        document.getElementById("kanban").innerHTML = "Ошибка: " + e;
+    }
+}
+
+let draggedSellerId = null;
+function dragStart(ev, sellerId) {
+    draggedSellerId = sellerId;
+    ev.dataTransfer.setData("text/plain", sellerId);
+}
+async function dropCard(ev, newStage) {
+    ev.preventDefault();
+    const sellerId = ev.dataTransfer.getData("text/plain") || draggedSellerId;
+    if (!sellerId) return;
+    
+    const resp = await fetch("/api/leads/stage", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ seller_id: sellerId, stage: newStage, reason: "Kanban drag" })
+    });
+    if (resp.ok) {
+        loadKanban();
+        load(); // reload analytics
+    } else {
+        const data = await resp.json();
+        alert("Ошибка: " + (data.error || "неизвестно"));
+    }
+}
+
+async function loadInbox() {
+    try {
+        const res = await fetch("/api/sellers?limit=2000");
+        const data = await res.json();
+        let sellers = data.rows || [];
+        
+        sellers = sellers.filter(s => s.reply_at && s.reply_at !== "");
+        sellers.sort((a, b) => new Date(b.reply_at) - new Date(a.reply_at));
+        
+        const hotOnly = document.getElementById("inboxHotFilter").checked;
+        const hotCategories = ['interested', 'negotiation', 'deal', 'positive', 'needs_info'];
+        
+        if (hotOnly) {
+            sellers = sellers.filter(s => hotCategories.includes(s.reply_category) || hotCategories.includes(s.stage));
+        }
+        
+        let html = "";
+        for (const s of sellers) {
+            const isHot = hotCategories.includes(s.reply_category) || hotCategories.includes(s.stage);
+            html += `<div class="inbox-item ${isHot ? 'inbox-hot' : ''}">
+                <div class="inbox-meta">
+                    <b>${esc(s.shop_name)}</b> <span class="muted" style="font-size:12px">${esc(s.reply_at)}</span><br>
+                    <div>Последнее сообщение (категория): ${esc(s.reply_category || 'неизвестно')}</div>
+                    <div>Этап: ${esc(s.stage || 'new')}</div>
+                </div>
+                <div class="inbox-actions">
+                    <button onclick="window.open('/?seller_id=${s.seller_id}', '_blank')">В CRM</button>
+                </div>
+            </div>`;
+        }
+        if (sellers.length === 0) {
+            html = '<div class="muted">Нет входящих сообщений по заданным фильтрам.</div>';
+        }
+        document.getElementById("inbox").innerHTML = html;
+    } catch(e) {
+        document.getElementById("inbox").innerHTML = "Ошибка: " + e;
+    }
+}
+
+async function createExp() {
+    const name = document.getElementById("expName").value;
+    const variantsText = document.getElementById("expVariants").value;
+    if (!name || !variantsText) return alert("Введите название и варианты");
+    const variants = variantsText.split(",").map(v => v.trim()).filter(v => v);
+    
+    const resp = await fetch("/api/experiments/create", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ name, variants, criteria: {limit: 10} })
+    });
+    if (resp.ok) {
+        load();
+        alert("Эксперимент создан!");
+    } else {
+        const data = await resp.json();
+        alert("Ошибка: " + (data.error || "неизвестно"));
+    }
+}
+
+// load it
+loadKanban();
+loadInbox();
+
 </script>
 </body>
 </html>

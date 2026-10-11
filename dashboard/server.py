@@ -48,11 +48,19 @@ PUBLIC_STATIC = {
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
 }
 
-DEFAULT_PORT = 8000
+DEFAULT_PORT = int(os.environ.get("PORT", "8000"))
 
 # База продавцов: мини-CRM с заметками и статусами
 DATA_DIR = REPO_ROOT / "data"
 DB_PATH = DATA_DIR / "sellers.sqlite3"
+
+# Авто-инициализация базы при первом запуске в облаке (Railway / Docker)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+if not DB_PATH.exists() or DB_PATH.stat().st_size == 0:
+    seed_path = REPO_ROOT / "seed_data" / "sellers.sqlite3"
+    if seed_path.exists() and seed_path.stat().st_size > 0:
+        import shutil
+        shutil.copy2(seed_path, DB_PATH)
 
 # Wildberries: код воркера и CRM в проекте остаётся, но по умолчанию выключен
 # (пока работаем чисто с Ozon — WB не мельтешит ни в UI, ни в API). Вернуть:
@@ -2792,6 +2800,19 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
+        if path == "/api/sellers/backup.sqlite3":
+            if not DB_PATH.exists():
+                return self._send_json({"error": "База не найдена"}, 404)
+            db_bytes = DB_PATH.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-sqlite3")
+            self.send_header("Content-Disposition", 'attachment; filename="sellers.sqlite3"')
+            self.send_header("Content-Length", str(len(db_bytes)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(db_bytes)
+            return
         if path == "/api/sellers/replies.xlsx":
             # Выгрузка «ответивших»: карточка + последняя переписка — для
             # менеджера и планшета.
@@ -3317,6 +3338,17 @@ class Handler(BaseHTTPRequestHandler):
             )
             return self._send_json({"ok": changed}, 200 if changed else 404)
 
+
+        if path == "/api/leads/stage":
+            seller_id = str(data.get("seller_id", "")).strip()
+            stage = str(data.get("stage", "")).strip()
+            reason = str(data.get("reason", "")).strip()
+            if not seller_id or not stage:
+                return self._send_json({"error": "нужны seller_id и stage"}, 400)
+            store = CRUD.store()
+            changed = store.set_stage(seller_id, stage, reason, "manager")
+            return self._send_json({"ok": changed})
+
         if path == "/api/leads/recompute":
             # Пересчёт Lead Intelligence: после правки lead_config.json или
             # массового обновления категорий.
@@ -3340,7 +3372,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 experiment_id = store.create_experiment(name, criteria, variants)
                 assigned = store.assign_experiment_sellers(
-                    experiment_id, self._experiment_candidates(store, criteria), variants)
+                    experiment_id, _experiment_candidates(store, criteria), variants)
             except ValueError as exc:
                 return self._send_json({"error": str(exc)}, 400)
             return self._send_json({"ok": True, "experiment_id": experiment_id,

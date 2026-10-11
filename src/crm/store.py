@@ -151,7 +151,12 @@ CREATE TABLE IF NOT EXISTS messages (
     sent_at     TEXT NOT NULL,
     result      TEXT NOT NULL DEFAULT 'sent',
     error       TEXT NOT NULL DEFAULT '',
-    category    TEXT NOT NULL DEFAULT ''
+    category    TEXT NOT NULL DEFAULT '',
+    template_name TEXT NOT NULL DEFAULT '',
+    sender_account_id TEXT NOT NULL DEFAULT '',
+    campaign_id TEXT NOT NULL DEFAULT '',
+    experiment_id TEXT NOT NULL DEFAULT '',
+    platform_message_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_messages_seller ON messages(seller_id, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at DESC);
@@ -164,6 +169,9 @@ CREATE TABLE IF NOT EXISTS sellers (
     shop_name           TEXT NOT NULL DEFAULT '',
     company_name        TEXT NOT NULL DEFAULT '',
     uscc                TEXT NOT NULL DEFAULT '',
+    wechat              TEXT NOT NULL DEFAULT '',
+    email               TEXT NOT NULL DEFAULT '',
+    phone               TEXT NOT NULL DEFAULT '',
     province            TEXT NOT NULL DEFAULT '',
     orders              INTEGER NOT NULL DEFAULT 0,
     reviews             INTEGER NOT NULL DEFAULT 0,
@@ -199,7 +207,8 @@ CREATE TABLE IF NOT EXISTS sellers (
     unanswered_reviews  INTEGER NOT NULL DEFAULT 0,
     unanswered_questions INTEGER NOT NULL DEFAULT 0,
     pain_score          REAL NOT NULL DEFAULT 0.0,
-    vitality_category   TEXT NOT NULL DEFAULT 'unknown'
+    vitality_category   TEXT NOT NULL DEFAULT 'unknown',
+    priority            INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -223,6 +232,38 @@ CREATE INDEX IF NOT EXISTS idx_seller_products_seller ON seller_products(seller_
 # дописывается новой строкой, существующие данные никогда не переписываются
 # (правило «не потерять правду»). Актуальная категория продавца — строка с
 # максимальным id. Таблица аддитивная: ничего из существующего не меняет.
+
+EXPERIMENTS_SCHEMA = '''
+CREATE TABLE IF NOT EXISTS experiments (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'active',
+    criteria       TEXT NOT NULL DEFAULT '{}',
+    variants       TEXT NOT NULL DEFAULT '[]',
+    created_at     TEXT NOT NULL,
+    finished_at    TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS experiment_sellers (
+    experiment_id  INTEGER NOT NULL,
+    seller_id      TEXT NOT NULL,
+    variant        TEXT NOT NULL,
+    assigned_at    TEXT NOT NULL,
+    PRIMARY KEY(experiment_id, seller_id)
+);
+'''
+
+FUNNEL_SCHEMA = '''
+CREATE TABLE IF NOT EXISTS funnel_transitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    seller_id TEXT NOT NULL,
+    to_stage TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    actor TEXT NOT NULL DEFAULT '',
+    event_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_funnel_seller ON funnel_transitions(seller_id);
+'''
+
 CATEGORIES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS seller_categories (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -329,14 +370,25 @@ class SellerStore:
             self._migrate_messages(conn)
             conn.executescript(PRODUCTS_SCHEMA)
             conn.executescript(CATEGORIES_SCHEMA)
+            conn.executescript(EXPERIMENTS_SCHEMA)
+            conn.executescript(FUNNEL_SCHEMA)
 
     @staticmethod
     def _migrate_messages(conn: sqlite3.Connection) -> None:
-        """Категория ответа в журнале сообщений (для баз, созданных раньше её)."""
+        """Добавляет недостающие колонки в журнал сообщений."""
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
-        if "category" not in existing:
-            conn.execute("ALTER TABLE messages ADD COLUMN category TEXT NOT NULL DEFAULT ''")
-            logger.info("Миграция: добавлена колонка messages.category")
+        extra_cols = {
+            "category": "TEXT NOT NULL DEFAULT ''",
+            "template_name": "TEXT NOT NULL DEFAULT ''",
+            "sender_account_id": "TEXT NOT NULL DEFAULT ''",
+            "campaign_id": "TEXT NOT NULL DEFAULT ''",
+            "experiment_id": "TEXT NOT NULL DEFAULT ''",
+            "platform_message_id": "TEXT NOT NULL DEFAULT ''",
+        }
+        for col, col_def in extra_cols.items():
+            if col not in existing:
+                conn.execute(f"ALTER TABLE messages ADD COLUMN {col} {col_def}")
+                logger.info(f"Миграция: добавлена колонка messages.{col}")
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -478,6 +530,10 @@ class SellerStore:
         reply_categories: Optional[Sequence[str]] = None,
         vitality: Optional[str] = None,
         niches: Optional[Sequence[str]] = None,
+        min_orders: Optional[int] = None,
+        max_orders: Optional[int] = None,
+        min_reviews: Optional[int] = None,
+        max_reviews: Optional[int] = None,
     ) -> Tuple[str, List]:
         """Собирает WHERE и параметры для выборки продавцов.
 
@@ -506,6 +562,19 @@ class SellerStore:
         if reply_categories:
             where.append(f"reply_category IN ({','.join('?' * len(reply_categories))})")
             params.extend(reply_categories)
+
+        if min_orders is not None:
+            where.append("orders >= ?")
+            params.append(min_orders)
+        if max_orders is not None:
+            where.append("orders <= ?")
+            params.append(max_orders)
+        if min_reviews is not None:
+            where.append("reviews >= ?")
+            params.append(min_reviews)
+        if max_reviews is not None:
+            where.append("reviews <= ?")
+            params.append(max_reviews)
 
         # Живость: SQL-эквиваленты порогов из src/crm/vitality.py (без
         # параметров: условия целочисленные, инъекции там неоткуда взяться).
@@ -550,6 +619,10 @@ class SellerStore:
         reply_categories: Optional[Sequence[str]] = None,
         vitality: Optional[str] = None,
         niches: Optional[Sequence[str]] = None,
+        min_orders: Optional[int] = None,
+        max_orders: Optional[int] = None,
+        min_reviews: Optional[int] = None,
+        max_reviews: Optional[int] = None,
     ) -> List[sqlite3.Row]:
         """Список продавцов для дашборда.
 
@@ -575,6 +648,10 @@ class SellerStore:
             reply_categories=reply_categories,
             vitality=vitality,
             niches=niches,
+            min_orders=min_orders,
+            max_orders=max_orders,
+            min_reviews=min_reviews,
+            max_reviews=max_reviews,
         )
         if order_by == "last_reply_at":
             order_sql = "last_reply_at"
@@ -979,7 +1056,15 @@ class SellerStore:
 
     # --- Совместимость с очередью рассылки -------------------------------
 
-    def claim_next(self, require_product_url: bool = False) -> Optional[sqlite3.Row]:
+    def claim_next(
+        self,
+        require_product_url: bool = False,
+        order_fresh: bool = False,
+        min_orders: Optional[int] = None,
+        max_orders: Optional[int] = None,
+        min_reviews: Optional[int] = None,
+        max_reviews: Optional[int] = None,
+    ) -> Optional[sqlite3.Row]:
         """Следующий продавец на отправку и пометка «в работе».
 
         Сортировка по score DESC: сначала самые крупные и долгоживущие.
@@ -994,9 +1079,21 @@ class SellerStore:
             params: List = [STATUS_NEW, VERIFY_USCC, VERIFY_WAREHOUSE]
             if require_product_url:
                 where += " AND sample_product_url != ''"
+            if min_orders is not None:
+                where += " AND orders >= ?"
+                params.append(min_orders)
+            if max_orders is not None:
+                where += " AND orders <= ?"
+                params.append(max_orders)
+            if min_reviews is not None:
+                where += " AND reviews >= ?"
+                params.append(min_reviews)
+            if max_reviews is not None:
+                where += " AND reviews <= ?"
+                params.append(max_reviews)
 
             row = conn.execute(
-                f"SELECT * FROM sellers WHERE {where} ORDER BY score DESC LIMIT 1", params
+                f"SELECT * FROM sellers WHERE {where} ORDER BY priority DESC, {'first_seen_at DESC' if order_fresh else 'score DESC'} LIMIT 1", params
             ).fetchone()
             if not row:
                 return None
@@ -1011,7 +1108,15 @@ class SellerStore:
                 f"SELECT {SELECT_FIELDS} FROM sellers WHERE seller_id = ?", (row["seller_id"],)
             ).fetchone()
 
-    def mark_sent(self, seller_id: str, message: str) -> None:
+    def mark_sent(
+        self,
+        seller_id: str,
+        message: str,
+        template_name: str = "",
+        sender_account_id: str = "",
+        experiment_id: str = "",
+        **kwargs,
+    ) -> None:
         now = _now()
         with self._connect() as conn:
             conn.execute(
@@ -1020,19 +1125,46 @@ class SellerStore:
                 (STATUS_SENT, message, now, now, seller_id),
             )
             conn.execute(
-                "INSERT INTO messages (seller_id, text, sent_at, result) VALUES (?, ?, ?, 'sent')",
-                (seller_id, message, now),
+                "INSERT INTO messages (seller_id, text, sent_at, result, template_name, sender_account_id, experiment_id) "
+                "VALUES (?, ?, ?, 'sent', ?, ?, ?)",
+                (seller_id, message, now, template_name, sender_account_id, str(experiment_id or "")),
             )
         logger.info(f"Отправлено: {seller_id}")
 
-    def log_message(self, seller_id: str, text: str, result: str, error: str = "") -> None:
+    def log_message(
+        self,
+        seller_id: str,
+        text: str,
+        result: str,
+        error: str = "",
+        template_name: str = "",
+        sender_account_id: str = "",
+        campaign_id: str = "",
+        experiment_id: str = "",
+        platform_message_id: str = "",
+        **kwargs,
+    ) -> None:
         """Записывает попытку в журнал, не меняя статус продавца."""
         import json as _json
+        now = _now()
+        err_str = _json.dumps(str(error)[:300], ensure_ascii=False)[1:-1] if error else ""
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO messages (seller_id, text, sent_at, result, error) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (seller_id, text, _now(), result, _json.dumps(error[:300], ensure_ascii=False)[1:-1]),
+                "INSERT INTO messages (seller_id, text, sent_at, result, error, template_name, "
+                "sender_account_id, campaign_id, experiment_id, platform_message_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    seller_id,
+                    text,
+                    now,
+                    result,
+                    err_str,
+                    template_name,
+                    sender_account_id,
+                    str(campaign_id or ""),
+                    str(experiment_id or ""),
+                    str(platform_message_id or ""),
+                ),
             )
 
     def find_seller_by_shop(self, shop_name: str) -> Optional[sqlite3.Row]:
@@ -1530,15 +1662,15 @@ class SellerStore:
             logger.info(f"Возвращено в очередь: {count}")
         return count
 
-    def mark_failed(self, seller_id: str, error: str, retryable: bool = True) -> None:
+    def mark_failed(self, seller_id: str, error: str, retryable: bool = True, **kwargs) -> None:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE sellers SET status = ?, last_error = ?, updated_at = ? WHERE seller_id = ?",
-                (STATUS_FAILED if retryable else STATUS_SKIPPED, error[:500], _now(), seller_id),
+                (STATUS_FAILED if retryable else STATUS_SKIPPED, str(error)[:500], _now(), seller_id),
             )
-        logger.warning(f"Не отправлено: {seller_id} — {error[:200]}")
+        logger.warning(f"Не отправлено: {seller_id} — {str(error)[:200]}")
 
-    def mark_opted_out(self, seller_id: str) -> None:
+    def mark_opted_out(self, seller_id: str, **kwargs) -> None:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE sellers SET status = ?, updated_at = ? WHERE seller_id = ?",
@@ -1546,11 +1678,12 @@ class SellerStore:
             )
         logger.info(f"В стоп-лист: {seller_id}")
 
-    def mark_skipped(self, seller_id: str) -> None:
+    def mark_skipped(self, seller_id: str, reason: str = "", **kwargs) -> None:
         with self._connect() as conn:
             conn.execute(
-                "UPDATE sellers SET status = ?, updated_at = ? WHERE seller_id = ?",
-                (STATUS_SKIPPED, _now(), seller_id),
+                "UPDATE sellers SET status = ?, last_error = ?, updated_at = ? "
+                "WHERE seller_id = ?",
+                (STATUS_SKIPPED, (reason or "пропущен")[:500], _now(), seller_id),
             )
 
     def release_stale(self, older_than_minutes: int = 30) -> int:
@@ -1575,7 +1708,7 @@ class SellerStore:
             ).fetchone()
         return bool(row) and row["status"] == STATUS_OPTED_OUT
 
-    def sent_since(self, since: datetime) -> int:
+    def sent_since(self, since: datetime, account_id: Optional[str] = None) -> int:
         """Сколько сообщений реально ушло с указанного момента.
 
         Считаем по messages, а не по sellers: в sellers хранится только
@@ -1583,14 +1716,16 @@ class SellerStore:
         а не по updated_at — тот обновляется от любой правки, и отметка
         «ответил» съедала дневной лимит.
         """
+        query = "SELECT COUNT(*) AS n FROM messages WHERE result = 'sent' AND sent_at >= ?"
+        params: List[Any] = [since.isoformat(timespec="seconds")]
+        if account_id is not None:
+            query += " AND sender_account_id = ?"
+            params.append(account_id)
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) AS n FROM messages WHERE result = 'sent' AND sent_at >= ?",
-                (since.isoformat(timespec="seconds"),),
-            ).fetchone()
+            row = conn.execute(query, params).fetchone()
         return int(row["n"]) if row else 0
 
-    def sent_today(self) -> int:
+    def sent_today(self, account_id: Optional[str] = None) -> int:
         """Отправлено за сегодня по ЛОКАЛЬНОМУ времени.
 
         Граница суток берётся местная, а не UTC: для Москвы UTC-сутки
@@ -1598,10 +1733,124 @@ class SellerStore:
         """
         start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         start_utc = start.astimezone(timezone.utc)
-        return self.sent_since(start_utc)
+        return self.sent_since(start_utc, account_id=account_id)
 
-    def sent_last_24h(self) -> int:
-        return self.sent_since(datetime.now(timezone.utc) - timedelta(hours=24))
+    def sent_last_24h(self, account_id: Optional[str] = None) -> int:
+        return self.sent_since(datetime.now(timezone.utc) - timedelta(hours=24), account_id=account_id)
+
+    def template_usage(self) -> Dict[str, int]:
+        """Сколько раз использовался каждый шаблон."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT template_name, COUNT(*) AS n FROM messages "
+                "WHERE result = 'sent' AND template_name IS NOT NULL AND template_name != '' "
+                "GROUP BY template_name"
+            ).fetchall()
+        return {r["template_name"]: int(r["n"]) for r in rows}
+
+    def last_template_used(self) -> str:
+        """Последний использованный шаблон для избежания повторов подряд."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT template_name FROM messages "
+                "WHERE result = 'sent' AND template_name IS NOT NULL AND template_name != '' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return str(row["template_name"]) if row and row["template_name"] else ""
+
+    def template_performance(self) -> Dict[str, dict]:
+        """A/B отдача каждого шаблона: отправки и положительные/нейтральные ответы."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT m1.template_name, "
+                "       COUNT(DISTINCT m1.seller_id) AS sent, "
+                "       COUNT(DISTINCT CASE WHEN m2.result = 'received' AND m2.category != 'negative' THEN m2.seller_id END) AS replies "
+                "FROM messages m1 "
+                "LEFT JOIN messages m2 ON m1.seller_id = m2.seller_id "
+                "WHERE m1.result = 'sent' AND m1.template_name IS NOT NULL AND m1.template_name != '' "
+                "GROUP BY m1.template_name"
+            ).fetchall()
+        return {r["template_name"]: {"sent": int(r["sent"]), "replies": int(r["replies"])} for r in rows}
+
+    def followup_candidates(
+        self,
+        after_days: int = 14,
+        limit: int = 10,
+        sender_account_id: Optional[str] = None,
+    ) -> List[sqlite3.Row]:
+        """Кандидаты на вежливое повторное касание (фоллоу-ап).
+
+        Отбираются продавцы со статусом 'sent', которым написали более after_days
+        назад, без полученных ответов и без ранее отправленного фоллоу-апа.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=after_days)).isoformat(
+            timespec="seconds"
+        )
+        conditions = [
+            "s.status = 'sent'",
+            "s.sent_at != ''",
+            "s.sent_at <= ?",
+            "NOT EXISTS (SELECT 1 FROM messages WHERE seller_id = s.seller_id AND result = 'received')",
+            "NOT EXISTS (SELECT 1 FROM messages WHERE seller_id = s.seller_id AND campaign_id = 'followup')",
+        ]
+        params: List[Any] = [cutoff]
+
+        if sender_account_id == "main":
+            conditions.append(
+                "NOT EXISTS (SELECT 1 FROM messages WHERE seller_id = s.seller_id "
+                "AND sender_account_id IS NOT NULL AND sender_account_id != '' AND sender_account_id != 'main')"
+            )
+        elif sender_account_id:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM messages WHERE seller_id = s.seller_id "
+                "AND sender_account_id = ?)"
+            )
+            params.append(sender_account_id)
+
+        where_clause = " AND ".join(conditions)
+        query = (
+            f"SELECT {SELECT_FIELDS} FROM sellers s "
+            f"WHERE {where_clause} "
+            f"ORDER BY s.sent_at ASC LIMIT ?"
+        )
+        params.append(limit)
+
+        with self._connect() as conn:
+            return conn.execute(query, params).fetchall()
+
+    def inbox_stats(self, hours: int = 24) -> dict:
+        """Статистика входящих за последние N часов: всего ответов и горячих."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(
+            timespec="seconds"
+        )
+        with self._connect() as conn:
+            replies = int(conn.execute(
+                "SELECT COUNT(*) AS n FROM messages WHERE result = 'received' AND sent_at >= ?",
+                (cutoff,),
+            ).fetchone()["n"])
+            hot = int(conn.execute(
+                "SELECT COUNT(*) AS n FROM messages WHERE result = 'received' AND sent_at >= ? "
+                "AND category IN ('positive', 'interested', 'needs_info')",
+                (cutoff,),
+            ).fetchone()["n"])
+        return {"replies": replies, "hot": hot}
+
+    def requeue_transient_chat_failures(self, older_than_minutes: int = 60) -> int:
+        """Возвращает в очередь продавцов, у которых не открылся чат, спустя время."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)).isoformat(
+            timespec="seconds"
+        )
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE sellers SET status = ?, updated_at = ? "
+                "WHERE status = ? AND last_attempt_at < ? "
+                "AND last_error LIKE '%чат не открылся%'",
+                (STATUS_NEW, _now(), STATUS_FAILED, cutoff),
+            )
+            count = cur.rowcount
+        if count:
+            logger.info(f"Возвращено в очередь транзиентных сбоев чата: {count}")
+        return count
 
     def queue_health(self) -> dict:
         """Сколько готово к отправке и сколько требует внимания."""
@@ -1652,3 +1901,109 @@ class SellerStore:
     def export_rows(self, verified_only: bool = True) -> List[sqlite3.Row]:
         """Все строки для выгрузки в CSV/Excel (без пагинации)."""
         return self.list_sellers(verified_only=verified_only, limit=1_000_000, offset=0)
+
+    # --- Phase 2: CRM & Analytics ---
+
+    def create_experiment(self, name: str, criteria: dict, variants: list) -> int:
+        import json
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO experiments (name, criteria, variants, created_at) VALUES (?, ?, ?, ?)",
+                (name, json.dumps(criteria), json.dumps(variants), _now())
+            )
+            return cursor.lastrowid
+
+    def finish_experiment(self, exp_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute("UPDATE experiments SET status = 'finished', finished_at = ? WHERE id = ?", (_now(), exp_id))
+            return cursor.rowcount > 0
+
+    def assign_experiment_sellers(self, exp_id: int, sellers: list, variants: list) -> int:
+        import random
+        assigned = 0
+        with self._connect() as conn:
+            for s in sellers:
+                v = random.choice(variants)
+                try:
+                    conn.execute("INSERT INTO experiment_sellers (experiment_id, seller_id, variant, assigned_at) VALUES (?, ?, ?, ?)",
+                                 (exp_id, s, v, _now()))
+                    assigned += 1
+                except Exception:
+                    pass
+        return assigned
+
+    def experiment_report(self, exp_id: int) -> dict:
+        import json
+        with self._connect() as conn:
+            exp = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
+            if not exp:
+                return {"error": "not found"}
+            variants = json.loads(exp["variants"])
+            stats = {v: {"assigned": 0, "sent": 0, "replied": 0, "deals": 0} for v in variants}
+            rows = conn.execute("SELECT variant, seller_id FROM experiment_sellers WHERE experiment_id = ?", (exp_id,)).fetchall()
+            for r in rows:
+                v = r["variant"]
+                if v in stats:
+                    stats[v]["assigned"] += 1
+                    s = conn.execute("SELECT message_sent, stage FROM sellers WHERE seller_id = ?", (r["seller_id"],)).fetchone()
+                    if s:
+                        if s["message_sent"]: stats[v]["sent"] += 1
+                        if s["stage"] in ('replied', 'interested', 'negotiation', 'deal'): stats[v]["replied"] += 1
+                        if s["stage"] == 'deal': stats[v]["deals"] += 1
+            return {"experiment": dict(exp), "variants": stats}
+
+    def set_stage(self, seller_id: str, stage: str, reason: str = "", actor: str = "") -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute("UPDATE sellers SET stage = ?, updated_at = ? WHERE seller_id = ?", (stage, _now(), seller_id))
+            if cursor.rowcount > 0:
+                conn.execute("INSERT INTO funnel_transitions (seller_id, to_stage, reason, actor, event_at) VALUES (?, ?, ?, ?, ?)",
+                             (seller_id, stage, reason, actor, _now()))
+            return cursor.rowcount > 0
+
+    def leads_distribution(self) -> dict:
+        with self._connect() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM sellers").fetchone()[0]
+            qualified = conn.execute("SELECT COUNT(*) FROM sellers WHERE verified_by IN ('uscc', 'warehouse')").fetchone()[0]
+            grades = {}
+            for row in conn.execute("SELECT lead_grade, COUNT(*) as c FROM sellers GROUP BY lead_grade").fetchall():
+                grades[row["lead_grade"] or "U"] = row["c"]
+            return {"total": total, "qualified": qualified, "grades": grades, "provinces": {}}
+
+    def communication_stats(self) -> dict:
+        with self._connect() as conn:
+            sent = conn.execute("SELECT COUNT(*) FROM sellers WHERE message_sent != ''").fetchone()[0]
+            replied = conn.execute("SELECT COUNT(*) FROM sellers WHERE stage IN ('replied', 'interested', 'negotiation', 'deal')").fetchone()[0]
+            return {"sent": sent, "replied": replied}
+
+    def funnel_counts(self) -> dict:
+        with self._connect() as conn:
+            counts = {}
+            for row in conn.execute("SELECT stage, COUNT(*) as c FROM sellers GROUP BY stage").fetchall():
+                counts[row["stage"] or "new"] = row["c"]
+            return counts
+
+    def funnel_transitions(self, limit: int) -> list:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT t.event_at, t.seller_id, s.shop_name, t.to_stage, t.reason, t.actor "
+                "FROM funnel_transitions t LEFT JOIN sellers s ON t.seller_id = s.seller_id "
+                "ORDER BY t.id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def recompute_all_lead_scores(self, config, limit: int = 0) -> int:
+        from src.crm.leads import score_lead
+        count = 0
+        with self._connect() as conn:
+            query = "SELECT * FROM sellers WHERE verified_by IN ('uscc', 'warehouse')"
+            if limit > 0: query += f" LIMIT {limit}"
+            rows = conn.execute(query).fetchall()
+            for r in rows:
+                d = dict(r)
+                res = score_lead(d, [], config)
+                conn.execute(
+                    "UPDATE sellers SET commercial_score=?, engagement_score=?, priority=?, lead_grade=?, grade_reason=? WHERE seller_id=?",
+                    (res["commercial"], res["engagement"], res["priority"], res["grade"], res["grade_reason"], r["seller_id"])
+                )
+                count += 1
+        return count

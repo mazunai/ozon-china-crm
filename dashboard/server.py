@@ -2718,6 +2718,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
     # --- GET ---------------------------------------------------------------- #
     def do_GET(self):
         try:
@@ -2727,6 +2731,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": f"Внутренняя ошибка: {exc}"}, 500)
 
     def _do_get(self):
+        # Авто-редирект с небезопасного HTTP на защищённый HTTPS
+        if self.headers.get("X-Forwarded-Proto") == "http":
+            host = self.headers.get("Host", "crm.sh-coding.ru")
+            self.send_response(301)
+            self.send_header("Location", f"https://{host}{self.path}")
+            self.end_headers()
+            return
+
         path = urlparse(self.path).path
         if path in PUBLIC_STATIC:
             name, content_type = PUBLIC_STATIC[path]
